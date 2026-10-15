@@ -619,6 +619,7 @@ function navigateTo(view, mode) {
     }
     if (view === 'settings') {
         loadSettings();
+        loadDiscoverWeekly();
     } else if (view === 'recommend') {
         initRecommendView();
     } else if (view === 'home') {
@@ -753,6 +754,7 @@ function historyIcon(type) {
 function historyIconTitle(type) {
     if (type === 'album_recommendation') return 'Album recommendation';
     if (type === 'seed_playlist') return 'Playlist from seed';
+    if (type === 'discover_weekly') return 'Discover Weekly';
     return 'Playlist from prompt';
 }
 
@@ -2925,6 +2927,8 @@ function setupEventListeners() {
 
     // Save settings
     document.getElementById('save-settings-btn').addEventListener('click', handleSaveSettings);
+    document.getElementById('dw-save-btn').addEventListener('click', saveDiscoverWeekly);
+    document.getElementById('dw-run-btn').addEventListener('click', runDiscoverWeekly);
 
     // Success modal - Start New Playlist
     document.getElementById('new-playlist-btn').addEventListener('click', hideSuccessModal);
@@ -3458,6 +3462,102 @@ async function loadSettings() {
         if (state.config.plex_connected) loadLibraryStats();
     } catch (error) {
         showError('Failed to load settings: ' + error.message);
+    }
+}
+
+// =============================================================================
+// Discover Weekly
+// =============================================================================
+
+let _dwPollTimer = null;
+
+const DW_FIELDS = {
+    enabled: 'dw-enabled', day: 'dw-day', time: 'dw-time', track_count: 'dw-track-count',
+    new_artist_share: 'dw-new-share', playlist_title: 'dw-title', lastfm_user: 'dw-lastfm-user',
+    lastfm_api_key: 'dw-lastfm-key',
+};
+
+function renderDiscoverWeekly(data) {
+    const s = data.settings;
+    document.getElementById('dw-enabled').checked = s.enabled;
+    document.getElementById('dw-day').value = s.day;
+    document.getElementById('dw-time').value = s.time;
+    document.getElementById('dw-track-count').value = s.track_count;
+    document.getElementById('dw-new-share').value = Math.round(s.new_artist_share * 100);
+    document.getElementById('dw-title').value = s.playlist_title;
+    document.getElementById('dw-lastfm-user').value = s.lastfm_user || '';
+    const key = document.getElementById('dw-lastfm-key');
+    key.value = '';
+    key.placeholder = s.has_lastfm_api_key ? 'Saved (leave empty to keep)' : 'From last.fm/api/account/create';
+    for (const [name, id] of Object.entries(DW_FIELDS)) {
+        const el = document.getElementById(id);
+        el.disabled = s.env_locked.includes(name);
+        el.title = el.disabled ? 'Set by an environment variable' : '';
+    }
+
+    const parts = [];
+    if (data.running) {
+        parts.push('Generating this week\'s playlist…');
+    } else if (data.last_run) {
+        const run = data.last_run;
+        const when = new Date(run.finished_at || run.started_at).toLocaleString();
+        if (run.status === 'success') {
+            parts.push(`Last: "${run.title}", ${run.picks.length} tracks (${when}).`);
+        } else if (run.status === 'error') {
+            parts.push(`Last attempt failed (${when}): ${run.error}`);
+        }
+    }
+    if (data.next_run_at) parts.push(`Next: ${new Date(data.next_run_at).toLocaleString()}.`);
+    document.getElementById('dw-status').textContent = parts.join(' ');
+    document.getElementById('dw-run-btn').disabled = data.running;
+
+    clearTimeout(_dwPollTimer);
+    if (data.running) _dwPollTimer = setTimeout(loadDiscoverWeekly, 5000);
+}
+
+async function loadDiscoverWeekly() {
+    try {
+        const resp = await fetch('/api/discover-weekly');
+        if (resp.ok) renderDiscoverWeekly(await resp.json());
+    } catch (error) {
+        console.warn('Discover Weekly status unavailable:', error);
+    }
+}
+
+async function saveDiscoverWeekly() {
+    const body = {
+        enabled: document.getElementById('dw-enabled').checked,
+        day: document.getElementById('dw-day').value,
+        time: document.getElementById('dw-time').value,
+        track_count: parseInt(document.getElementById('dw-track-count').value, 10),
+        new_artist_share: parseInt(document.getElementById('dw-new-share').value, 10) / 100,
+        playlist_title: document.getElementById('dw-title').value.trim(),
+        lastfm_user: document.getElementById('dw-lastfm-user').value.trim(),
+    };
+    const key = document.getElementById('dw-lastfm-key').value.trim();
+    if (key) body.lastfm_api_key = key;
+    try {
+        const resp = await fetch('/api/discover-weekly/settings', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'Failed to save');
+        renderDiscoverWeekly(data);
+        showSuccess('Discover Weekly settings saved');
+    } catch (error) {
+        showError('Failed to save Discover Weekly: ' + error.message);
+    }
+}
+
+async function runDiscoverWeekly() {
+    try {
+        const resp = await fetch('/api/discover-weekly/run', { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'Failed to start');
+        showSuccess(data.message);
+        loadDiscoverWeekly();
+    } catch (error) {
+        showError('Discover Weekly: ' + error.message);
     }
 }
 

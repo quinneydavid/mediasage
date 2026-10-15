@@ -516,6 +516,7 @@ body {
 
 input[type="text"],
 input[type="password"],
+input[type="time"],
 textarea,
 select {
     width: 100%;
@@ -541,6 +542,7 @@ select {
 
 input[type="text"]:focus,
 input[type="password"]:focus,
+input[type="time"]:focus,
 textarea:focus,
 select:focus {
     outline: 2px solid var(--accent);
@@ -550,6 +552,7 @@ select:focus {
 
 input[type="text"]:focus:not(:focus-visible),
 input[type="password"]:focus:not(:focus-visible),
+input[type="time"]:focus:not(:focus-visible),
 textarea:focus:not(:focus-visible),
 select:focus:not(:focus-visible) {
     outline: none;
@@ -3658,4 +3661,19 @@ body.no-scroll {
     .setup-step-body {
         padding: 0 var(--spacing-sm) var(--spacing-sm);
     }
+}
+
+/* Discover Weekly settings */
+.dw-inline {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.dw-inline select,
+.dw-inline input {
+    flex: 1;
+}
+
+.dw-inline input[type="time"] {
+    color-scheme: dark;
 }

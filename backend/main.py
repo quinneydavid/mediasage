@@ -31,6 +31,9 @@ from backend.config import (
 )
 from backend.version import get_version
 from backend.models import (
+    DiscoverWeeklyRunResponse,
+    DiscoverWeeklySettingsRequest,
+    DiscoverWeeklyStatusResponse,
     AlbumCandidate,
     AlbumPreviewResponse,
     AnalyzePromptFiltersRequest,
@@ -90,6 +93,7 @@ from backend.models import (
 from backend.plex_client import PlexClient as PlexClientInstance, get_plex_client, init_plex_client
 from backend.jellyfin_client import JellyfinClient, get_jellyfin_client, init_jellyfin_client
 from backend import library_cache
+from backend import discover_weekly
 from backend.model_catalog import CATALOG_BY_ID, MODEL_CATALOG
 from backend.llm_client import (
     TOKENS_PER_ALBUM,
@@ -138,6 +142,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize DB schema early so migration flag is set
     library_cache.ensure_db_initialized().close()
+    discover_weekly.startup()
 
     # Re-sync after a schema migration, or when the cache holds another server's library
     # (e.g. MEDIA_SERVER changed). sync_library clears a different server's tracks first.
@@ -223,6 +228,26 @@ async def _keep_library_fresh() -> None:
             _sync_if_due()
         except Exception:
             logger.exception("Library freshness check failed")
+        try:
+            await _discover_weekly_if_due()
+        except Exception:
+            logger.exception("Discover Weekly check failed")
+
+
+async def _discover_weekly_if_due() -> None:
+    """Start this week's Discover Weekly once its slot has passed (and the library cache is usable)."""
+    settings = await asyncio.to_thread(discover_weekly.load_settings)
+    if not settings.enabled:
+        return
+    progress = library_cache.get_sync_progress()
+    if progress["is_syncing"] and progress.get("sync_kind") != "incremental":
+        return   # wait for a full sync to finish
+    media_client = get_current_media_client()
+    if not media_client or not media_client.is_connected() or not library_cache.has_cached_tracks():
+        return
+    if await asyncio.to_thread(discover_weekly.is_due, settings):
+        logger.info("Discover Weekly is due — generating this week's playlist")
+        asyncio.create_task(asyncio.to_thread(discover_weekly.run, media_client, "schedule"))
 
 
 def _resync_for_new_media_server() -> None:
@@ -1764,7 +1789,44 @@ async def recommend_generate(request: RecommendGenerateRequest, raw_request: Req
 # =============================================================================
 
 
-_VALID_RESULT_TYPES = {"prompt_playlist", "seed_playlist", "album_recommendation"}
+_VALID_RESULT_TYPES = {"prompt_playlist", "seed_playlist", "album_recommendation", "discover_weekly"}
+
+
+# =============================================================================
+# Discover Weekly
+# =============================================================================
+
+
+@app.get("/api/discover-weekly", response_model=DiscoverWeeklyStatusResponse)
+async def get_discover_weekly() -> DiscoverWeeklyStatusResponse:
+    """Settings, next scheduled run and the last run with its picks."""
+    return DiscoverWeeklyStatusResponse(**await asyncio.to_thread(discover_weekly.status))
+
+
+@app.post("/api/discover-weekly/run", response_model=DiscoverWeeklyRunResponse)
+async def run_discover_weekly() -> DiscoverWeeklyRunResponse:
+    """Generate this week's Discover Weekly now (in the background; poll GET /api/discover-weekly)."""
+    media_client = get_current_media_client()
+    if not media_client or not media_client.is_connected():
+        raise HTTPException(status_code=503, detail="Media server not connected")
+    if not get_llm_client():
+        raise HTTPException(status_code=400, detail="No AI provider configured")
+    if discover_weekly.status()["running"]:
+        return DiscoverWeeklyRunResponse(started=False, message="Discover Weekly is already running")
+    asyncio.create_task(asyncio.to_thread(discover_weekly.run, media_client, "manual"))
+    return DiscoverWeeklyRunResponse(started=True, message="Generating this week's Discover Weekly")
+
+
+@app.post("/api/discover-weekly/settings", response_model=DiscoverWeeklyStatusResponse)
+async def save_discover_weekly_settings(request: DiscoverWeeklySettingsRequest) -> DiscoverWeeklyStatusResponse:
+    """Save Discover Weekly settings (fields set by environment variables stay locked)."""
+    try:
+        await asyncio.to_thread(discover_weekly.save_settings, request.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ConfigSaveError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return DiscoverWeeklyStatusResponse(**await asyncio.to_thread(discover_weekly.status))
 
 
 @app.get("/api/results", response_model=ResultListResponse)
