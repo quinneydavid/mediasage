@@ -16,6 +16,9 @@ import httpx
 from backend import library_cache
 
 logger = logging.getLogger(__name__)
+# httpx logs every request URL at INFO, and Last.fm (like Plex) takes its key in the query string: keep keys out of
+# the logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 API_URL = "https://ws.audioscrobbler.com/2.0/"
 MIN_INTERVAL_S = 0.25          # Last.fm asks for at most ~5 requests per second
