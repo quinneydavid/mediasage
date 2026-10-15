@@ -24,16 +24,30 @@ ANCHOR_WEIGHT = 1.0         # fit added per unit of Last.fm similarity to an anc
 RECENT_THEMES = 4           # themes of this many earlier weeks are avoided
 BROAD_TAG_SHARE = 0.2       # a tag on more than this share of artists is too broad to define a theme on its own
 SPECIFIC_IDF = 3.0          # tags at least this rare (idf; ~5 % of artists) count fully, broader ones less
+UMBRELLA_WEIGHT = 0.25      # most an umbrella genre counts toward lanes and theme fit
+# Umbrella genres: in a varied library each sits on only a few percent of artists, so rarity alone can't tell
+# "indie" or "dance" from a real style. On their own they don't make a theme.
+UMBRELLA_TAGS = frozenset({
+    "alternative", "dance", "edm", "electronic", "electronica", "experimental", "hip hop", "hip-hop", "indie",
+    "instrumental", "metal", "pop", "rap", "rock", "urban", "world", "chillout", "chill", "underground",
+})
+
+
+def is_broad(tag: str, shares: dict[str, float] | None = None) -> bool:
+    """An umbrella genre, or a tag on so many of the library's artists that it says little."""
+    return tag in UMBRELLA_TAGS or (shares or {}).get(tag, 0) > BROAD_TAG_SHARE
 
 
 def tag_specificity(tags_by_key: dict[str, list[tuple[str, int]]]) -> dict[str, float]:
     """0-1 per tag: how distinctive it is in this library. "electronic" on a third of all artists says little
-    (~0.4); "deep house" or "trip-hop" on 2-3 % says a lot (1.0)."""
+    (~0.4); "deep house" or "trip-hop" on 2-3 % says a lot (1.0). Umbrella genres never count more than
+    UMBRELLA_WEIGHT."""
     df: Counter = Counter()
     for tags in tags_by_key.values():
         df.update({t for t, _ in tags})
     n = max(1, sum(1 for tags in tags_by_key.values() if tags))
-    return {tag: min(1.0, math.log(n / count) / SPECIFIC_IDF) for tag, count in df.items()}
+    return {tag: min(UMBRELLA_WEIGHT if tag in UMBRELLA_TAGS else 1.0, math.log(n / count) / SPECIFIC_IDF)
+            for tag, count in df.items()}
 
 
 def tag_share(tags_by_key: dict[str, list[tuple[str, int]]]) -> dict[str, float]:
@@ -155,7 +169,7 @@ def choose_themes(llm: Any, lanes: list[dict[str, Any]], recent: list[str], requ
             if not isinstance(item, dict):
                 continue
             tags = [t for t in (str(x).strip().lower() for x in item.get("tags") or []) if t in vocabulary]
-            specific = [t for t in tags if (shares or {}).get(t, 0) <= BROAD_TAG_SHARE]
+            specific = [t for t in tags if not is_broad(t, shares)]
             tags = specific or tags     # broad umbrella tags only count when nothing more specific was given
             if not tags:
                 continue
