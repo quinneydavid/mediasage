@@ -902,6 +902,19 @@
                         <p class="filter-hint">1 = every track is by a different artist.</p>
                     </div>
                     <div class="form-group">
+                        <label for="dw-theme-mode">Weekly theme</label>
+                        <select id="dw-theme-mode">
+                            <option value="auto">One style per week, from what you play</option>
+                            <option value="off">Off (mix of everything)</option>
+                        </select>
+                        <p class="filter-hint">Picks a style lane from your recent listening (Last.fm tags) and keeps the whole week inside it, rotating week to week. Needs Last.fm below.</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="dw-next-theme">Next theme (optional)</label>
+                        <input type="text" id="dw-next-theme" placeholder="e.g. jazz, 90s hip hop, deep house">
+                        <p class="filter-hint">Used once, for the next playlist (scheduled or Generate now).</p>
+                    </div>
+                    <div class="form-group">
                         <label class="checkbox-label"><input type="checkbox" id="dw-order-by-sound"> Order by sound</label>
                         <p class="filter-hint">Arranges the tracks so each one flows into the next, using Plex's sonic analysis and loudness. The AI's opening and closing tracks stay put.</p>
                     </div>

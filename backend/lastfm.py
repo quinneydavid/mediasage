@@ -25,6 +25,23 @@ _request_lock = threading.Lock()
 _last_request_at = 0.0
 
 
+# Tags that say nothing about how music sounds (opinions, origins, decades, collection habits)
+_NOISE_TAGS = {
+    "seen live", "favorites", "favourites", "favorite", "favourite", "love", "loved", "beautiful", "awesome", "cool",
+    "amazing", "best", "good", "great", "albums i own", "my music", "spotify", "female vocalists", "male vocalists",
+    "female vocalist", "male vocalist", "female", "male", "singer-songwriter", "british", "american", "uk", "usa",
+    "english", "canadian", "australian", "german", "french", "swedish", "irish", "scottish", "japanese", "icelandic",
+    "london", "new york", "all", "under 2000 listeners", "check out", "to listen", "fip", "radio", "covers",
+}
+
+
+def _is_noise_tag(tag: str) -> bool:
+    if tag in _NOISE_TAGS or len(tag) > 40:
+        return True
+    stripped = tag.rstrip("s").replace("'", "")
+    return stripped.isdigit() or (len(stripped) == 4 and stripped[:2] in ("19", "20") and stripped[2:].isdigit())
+
+
 class LastFmError(Exception):
     """A Last.fm request failed."""
 
@@ -117,6 +134,19 @@ class LastFmClient:
         data = self._get("artist.getsimilar", 30 * DAY, artist=artist, limit=limit, autocorrect=1)
         similar = (data.get("similarartists") or {}).get("artist") or []
         return [(a["name"], float(a.get("match") or 0)) for a in similar]
+
+    def artist_top_tags(self, artist: str) -> list[tuple[str, int]]:
+        """(tag, weight 0-100) for the artist, most used first, lowercased; non-genre tags are dropped."""
+        data = self._get("artist.gettoptags", 60 * DAY, artist=artist, autocorrect=1)
+        tags = (data.get("toptags") or {}).get("tag") or []
+        own = artist.strip().lower()
+        out = []
+        for t in tags:
+            name = str(t.get("name") or "").strip().lower()
+            weight = int(t.get("count") or 0)
+            if name and weight >= 5 and name != own and not _is_noise_tag(name):
+                out.append((name, weight))
+        return out[:15]
 
     def artist_top_tracks(self, artist: str, limit: int = 50) -> list[str]:
         """Track titles of the artist, most listened first."""

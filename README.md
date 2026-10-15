@@ -127,12 +127,13 @@ Real-time track counts show exactly how your filters narrow results.
 Large libraries hide a lot of music you've never heard. Discover Weekly finds it for you, once a week, without prompts:
 
 1. **Taste profile** from your play history (most played lately and overall, favourite genres, recent and highly rated tracks) and, optionally, your Last.fm history.
-2. **One track per artist** by default (no artist appears twice in a week).
-3. **Candidates**: artists in your library you've never played, plus unplayed albums by artists you know (default 70 / 30). With Last.fm, artists you've scrobbled count as known and Last.fm's similar artists rank candidates higher.
-4. **Two AI steps**: the AI first picks the artists and albums that fit you best, then picks and orders the tracks, with a reason for each and a title for the week. Every candidate has an id the AI must return, so every pick is a real track in your library.
-5. **Ordered by sound** (Plex): Plex's sonic analysis says which tracks sound alike (two tracks that share many nearest neighbours), loudness avoids big volume jumps, and the tracks between the AI's opening and closing track are arranged into the smoothest path. Pair it with Plexamp's Sweet Fades for seamless transitions.
-6. **One playlist** on your media server ("Discover Weekly" by default) gets its tracks replaced each week; each week is also saved to History.
-7. **Feedback**: picks you go on to play make similar picks likelier; artists you rate 1-2 stars are left out; artists from the last few weeks rest for a while.
+2. **A theme per week** (with Last.fm): your recent listening is summed into style lanes from Last.fm artist tags ("deep house", "trip-hop", "neo-soul"); the AI picks one lane, different from the last few weeks, and every pick has to fit it. You can also wish for the next theme ("jazz", "90s hip hop"). The first run fetches tags for the whole library (cached for 60 days; ~15-20 min for ~4,500 artists).
+3. **One track per artist** by default (no artist appears twice in a week).
+4. **Candidates**: artists in your library you've never played, plus unplayed albums by artists you know (default 70 / 30). With Last.fm, artists you've scrobbled count as known and Last.fm's similar artists rank candidates higher.
+5. **Two AI steps**: the AI first picks the artists and albums that fit you best, then picks and orders the tracks, with a reason for each and a title for the week. Every candidate has an id the AI must return, so every pick is a real track in your library.
+6. **Ordered by sound** (Plex): Plex's sonic analysis says which tracks sound alike (two tracks that share many nearest neighbours), loudness avoids big volume jumps, and the tracks between the AI's opening and closing track are arranged into the smoothest path. Pair it with Plexamp's Sweet Fades for seamless transitions.
+7. **One playlist** on your media server ("Discover Weekly" by default) gets its tracks replaced each week; each week is also saved to History.
+8. **Feedback**: picks you go on to play make similar picks likelier; artists you rate 1-2 stars are left out; artists from the last few weeks rest for a while.
 
 Turn it on under **Settings → Discover Weekly** (day, time, size, mix, playlist name, optional Last.fm user and [API key](https://www.last.fm/api/account/create)), or use **Generate now**. A run takes about a minute on a local model (two AI calls; ~70K tokens for a ~390K-track library). A failed run retries hourly.
 
@@ -370,6 +371,7 @@ Environment variables are optional, for scripted or automated installs. A variab
 | `DISCOVER_WEEKLY_TRACKS` | Tracks per week (default: 30) |
 | `DISCOVER_WEEKLY_TITLE` | Playlist name (default: Discover Weekly) |
 | `DISCOVER_WEEKLY_MAX_PER_ARTIST` | Tracks by the same artist per week (default: 1 = no repeated artists; featured credits count as the main artist) |
+| `DISCOVER_WEEKLY_THEMES` | `auto` (default): one style theme per week from your listening (needs Last.fm); `off`: a mix of everything |
 | `DISCOVER_WEEKLY_ORDER_BY_SOUND` | `false` keeps the AI's track order; by default (Plex) tracks are arranged so each flows into the next by sonic similarity and loudness |
 | `DISCOVER_WEEKLY_NEW_ARTIST_SHARE` | Share of tracks by artists you've never played, 0-1 (default: 0.7); the rest are unplayed albums by known artists |
 | `LASTFM_USER` / `LASTFM_API_KEY` | Optional Last.fm history and similar artists for Discover Weekly |
@@ -567,7 +569,7 @@ Interactive documentation available at `/docs` when running.
 | `/api/recommend/generate` | POST | Generate album recommendations |
 | `/api/recommend/switch-mode` | POST | Switch library/discovery mode |
 | `/api/discover-weekly` | GET | Discover Weekly settings, next run, last run with picks and reasons |
-| `/api/discover-weekly/run` | POST | Generate this week's Discover Weekly now (background) |
+| `/api/discover-weekly/run` | POST | Generate this week's Discover Weekly now (background; `?theme=jazz` for a theme wish) |
 | `/api/discover-weekly/settings` | POST | Save Discover Weekly settings |
 | `/api/results` | GET | List saved result history |
 | `/api/results/{id}` | GET/DELETE | Get or delete a saved result |

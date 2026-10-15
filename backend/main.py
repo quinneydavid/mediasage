@@ -1804,7 +1804,9 @@ async def get_discover_weekly() -> DiscoverWeeklyStatusResponse:
 
 
 @app.post("/api/discover-weekly/run", response_model=DiscoverWeeklyRunResponse)
-async def run_discover_weekly() -> DiscoverWeeklyRunResponse:
+async def run_discover_weekly(
+    theme: str | None = Query(None, description="Theme wish for this run, e.g. 'jazz' (default: automatic)"),
+) -> DiscoverWeeklyRunResponse:
     """Generate this week's Discover Weekly now (in the background; poll GET /api/discover-weekly)."""
     media_client = get_current_media_client()
     if not media_client or not media_client.is_connected():
@@ -1813,7 +1815,7 @@ async def run_discover_weekly() -> DiscoverWeeklyRunResponse:
         raise HTTPException(status_code=400, detail="No AI provider configured")
     if discover_weekly.status()["running"]:
         return DiscoverWeeklyRunResponse(started=False, message="Discover Weekly is already running")
-    asyncio.create_task(asyncio.to_thread(discover_weekly.run, media_client, "manual"))
+    asyncio.create_task(asyncio.to_thread(discover_weekly.run, media_client, "manual", (theme or "").strip() or None))
     return DiscoverWeeklyRunResponse(started=True, message="Generating this week's Discover Weekly")
 
 

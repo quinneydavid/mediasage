@@ -3473,7 +3473,8 @@ let _dwPollTimer = null;
 
 const DW_FIELDS = {
     enabled: 'dw-enabled', day: 'dw-day', time: 'dw-time', track_count: 'dw-track-count',
-    new_artist_share: 'dw-new-share', max_per_artist: 'dw-max-per-artist', order_by_sound: 'dw-order-by-sound', playlist_title: 'dw-title', lastfm_user: 'dw-lastfm-user',
+    new_artist_share: 'dw-new-share', max_per_artist: 'dw-max-per-artist', order_by_sound: 'dw-order-by-sound', theme_mode: 'dw-theme-mode', next_theme: 'dw-next-theme',
+    playlist_title: 'dw-title', lastfm_user: 'dw-lastfm-user',
     lastfm_api_key: 'dw-lastfm-key',
 };
 
@@ -3486,6 +3487,8 @@ function renderDiscoverWeekly(data) {
     document.getElementById('dw-new-share').value = Math.round(s.new_artist_share * 100);
     document.getElementById('dw-max-per-artist').value = s.max_per_artist;
     document.getElementById('dw-order-by-sound').checked = s.order_by_sound;
+    document.getElementById('dw-theme-mode').value = s.theme_mode;
+    document.getElementById('dw-next-theme').value = s.next_theme || '';
     document.getElementById('dw-title').value = s.playlist_title;
     document.getElementById('dw-lastfm-user').value = s.lastfm_user || '';
     const key = document.getElementById('dw-lastfm-key');
@@ -3504,12 +3507,16 @@ function renderDiscoverWeekly(data) {
         const run = data.last_run;
         const when = new Date(run.finished_at || run.started_at).toLocaleString();
         if (run.status === 'success') {
-            parts.push(`Last: "${run.title}", ${run.picks.length} tracks (${when}).`);
+            const theme = run.theme ? ` - theme: ${run.theme.name}` : '';
+            parts.push(`Last: "${run.title}"${theme}, ${run.picks.length} tracks (${when}).`);
         } else if (run.status === 'error') {
             parts.push(`Last attempt failed (${when}): ${run.error}`);
         }
     }
     if (data.next_run_at) parts.push(`Next: ${new Date(data.next_run_at).toLocaleString()}.`);
+    if (data.recent_themes && data.recent_themes.length > 1) {
+        parts.push(`Recent themes: ${data.recent_themes.slice(1).join(', ')}.`);
+    }
     document.getElementById('dw-status').textContent = parts.join(' ');
     document.getElementById('dw-run-btn').disabled = data.running;
 
@@ -3535,6 +3542,8 @@ async function saveDiscoverWeekly() {
         new_artist_share: parseInt(document.getElementById('dw-new-share').value, 10) / 100,
         max_per_artist: parseInt(document.getElementById('dw-max-per-artist').value, 10),
         order_by_sound: document.getElementById('dw-order-by-sound').checked,
+        theme_mode: document.getElementById('dw-theme-mode').value,
+        next_theme: document.getElementById('dw-next-theme').value.trim(),
         playlist_title: document.getElementById('dw-title').value.trim(),
         lastfm_user: document.getElementById('dw-lastfm-user').value.trim(),
     };
