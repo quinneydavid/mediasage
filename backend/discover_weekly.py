@@ -30,6 +30,7 @@ from backend.lastfm import LastFmClient, LastFmError
 from backend.llm_client import get_llm_client, get_model_context_limit
 from backend.models import GenerateResponse, Track
 from backend.plex_client import simplify_string
+from backend.sonic_order import order_by_sound
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ ENV = {
     "playlist_title": "DISCOVER_WEEKLY_TITLE",
     "new_artist_share": "DISCOVER_WEEKLY_NEW_ARTIST_SHARE",
     "max_per_artist": "DISCOVER_WEEKLY_MAX_PER_ARTIST",
+    "order_by_sound": "DISCOVER_WEEKLY_ORDER_BY_SOUND",
     "lastfm_user": "LASTFM_USER",
     "lastfm_api_key": "LASTFM_API_KEY",
 }
@@ -74,6 +76,7 @@ class Settings:
     playlist_title: str = "Discover Weekly"
     new_artist_share: float = 0.7
     max_per_artist: int = 1         # tracks by the same (main) artist in one week
+    order_by_sound: bool = True     # reorder by the media server's sonic analysis so tracks blend (Plex)
     lastfm_user: str = ""
     lastfm_api_key: str = ""
     env_locked: list[str] = field(default_factory=list)
@@ -87,14 +90,14 @@ class Settings:
         return {
             "enabled": self.enabled, "day": self.day, "time": self.time, "track_count": self.track_count,
             "playlist_title": self.playlist_title, "new_artist_share": self.new_artist_share,
-            "max_per_artist": self.max_per_artist,
+            "max_per_artist": self.max_per_artist, "order_by_sound": self.order_by_sound,
             "lastfm_user": self.lastfm_user, "has_lastfm_api_key": bool(self.lastfm_api_key),
             "env_locked": self.env_locked,
         }
 
 
 def _coerce(name: str, value: Any) -> Any:
-    if name == "enabled":
+    if name in ("enabled", "order_by_sound"):
         return value if isinstance(value, bool) else str(value).strip().lower() in ("1", "true", "yes", "on")
     if name == "track_count":
         return max(5, min(100, int(value)))
@@ -782,6 +785,15 @@ def generate(settings: Settings, media_client: Any, now: datetime | None = None,
                              settings.max_per_artist)
     if not selected:
         raise RuntimeError("the AI returned no usable tracks")
+    if settings.order_by_sound:
+        say("ordering by sound")
+        try:
+            by_key = {t["rating_key"]: (t, reason) for t, reason in selected}
+            ordered, stats = order_by_sound(media_client, list(by_key))
+            selected = [by_key[k] for k in ordered]
+            say(f"sound ordering: {stats}")
+        except Exception as e:      # ordering is a refinement; keep the AI's order
+            logger.warning("Discover Weekly: ordering by sound failed, keeping the AI's order: %s", e)
 
     local = (now or _now()).astimezone()
     week = f"{local.day} {local:%b %Y}"

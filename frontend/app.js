@@ -3473,7 +3473,7 @@ let _dwPollTimer = null;
 
 const DW_FIELDS = {
     enabled: 'dw-enabled', day: 'dw-day', time: 'dw-time', track_count: 'dw-track-count',
-    new_artist_share: 'dw-new-share', max_per_artist: 'dw-max-per-artist', playlist_title: 'dw-title', lastfm_user: 'dw-lastfm-user',
+    new_artist_share: 'dw-new-share', max_per_artist: 'dw-max-per-artist', order_by_sound: 'dw-order-by-sound', playlist_title: 'dw-title', lastfm_user: 'dw-lastfm-user',
     lastfm_api_key: 'dw-lastfm-key',
 };
 
@@ -3485,6 +3485,7 @@ function renderDiscoverWeekly(data) {
     document.getElementById('dw-track-count').value = s.track_count;
     document.getElementById('dw-new-share').value = Math.round(s.new_artist_share * 100);
     document.getElementById('dw-max-per-artist').value = s.max_per_artist;
+    document.getElementById('dw-order-by-sound').checked = s.order_by_sound;
     document.getElementById('dw-title').value = s.playlist_title;
     document.getElementById('dw-lastfm-user').value = s.lastfm_user || '';
     const key = document.getElementById('dw-lastfm-key');
@@ -3533,6 +3534,7 @@ async function saveDiscoverWeekly() {
         track_count: parseInt(document.getElementById('dw-track-count').value, 10),
         new_artist_share: parseInt(document.getElementById('dw-new-share').value, 10) / 100,
         max_per_artist: parseInt(document.getElementById('dw-max-per-artist').value, 10),
+        order_by_sound: document.getElementById('dw-order-by-sound').checked,
         playlist_title: document.getElementById('dw-title').value.trim(),
         lastfm_user: document.getElementById('dw-lastfm-user').value.trim(),
     };

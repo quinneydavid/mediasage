@@ -349,6 +349,42 @@ class PlexClient(BaseMediaClient):
                 }
         return out
 
+    def sonic_neighbor_artists(self, rating_key: str, limit: int = 2000) -> set[str]:
+        """Artists of the tracks Plex's sonic analysis puts nearest to this track (empty without sonic data).
+
+        Two tracks that sound alike share many of these artists, which makes the overlap a usable similarity even
+        for tracks too far apart to appear in each other's nearest list.
+        """
+        if not self._server:
+            return set()
+        try:
+            data = self._server.query(f"/library/metadata/{rating_key}/nearest?limit={int(limit)}&maxDistance=1")
+        except NotFound:
+            return set()
+        return {el.attrib["grandparentTitle"].strip().lower() for el in data if el.attrib.get("grandparentTitle")}
+
+    def track_loudness(self, rating_keys: list[str]) -> dict[str, float]:
+        """Integrated loudness (LUFS) per track from Plex's audio analysis, batched; tracks without it are left out."""
+        out: dict[str, float] = {}
+        if not self._server:
+            return out
+        keys = [k for k in rating_keys if k]
+        for i in range(0, len(keys), self.METADATA_BATCH):
+            try:
+                data = self._server.query("/library/metadata/" + ",".join(keys[i : i + self.METADATA_BATCH]))
+            except NotFound:
+                continue
+            for el in data:
+                for stream in el.iter("Stream"):
+                    value = stream.attrib.get("loudness")
+                    if value:
+                        try:
+                            out[str(el.attrib.get("ratingKey"))] = float(value)
+                        except ValueError:
+                            pass
+                        break
+        return out
+
     def get_all_albums_metadata(self) -> dict[str, dict[str, Any]]:
         """Fetch all albums and return mapping of rating_key -> metadata.
 
