@@ -1,7 +1,7 @@
 """Pydantic models for MediaSage API contracts and internal data structures."""
 
 import re
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -971,3 +971,37 @@ class SetupCompleteResponse(BaseModel):
     """Response from marking setup as complete."""
 
     success: bool
+
+
+# =============================================================================
+# Discover Weekly
+# =============================================================================
+
+
+class DiscoverWeeklySettingsRequest(BaseModel):
+    """Discover Weekly settings to save (omitted fields are unchanged)."""
+
+    enabled: bool | None = None
+    day: str | None = None                  # monday..sunday
+    time: str | None = None                 # HH:MM, container time zone
+    track_count: int | None = Field(None, ge=5, le=100)
+    playlist_title: str | None = None
+    new_artist_share: float | None = Field(None, ge=0, le=1)
+    lastfm_user: str | None = None
+    lastfm_api_key: str | None = None
+
+
+class DiscoverWeeklyStatusResponse(BaseModel):
+    """Discover Weekly settings, schedule and the last run (with its picks and reasons)."""
+
+    settings: dict[str, Any]
+    running: bool
+    next_run_at: str | None = None
+    last_run: dict[str, Any] | None = None
+    last_success_at: str | None = None
+    playlist_id: str | None = None
+
+
+class DiscoverWeeklyRunResponse(BaseModel):
+    started: bool
+    message: str

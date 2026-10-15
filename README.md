@@ -112,6 +112,18 @@ Before the AI sees anything, you control the pool:
 
 Real-time track counts show exactly how your filters narrow results.
 
+### Discover Weekly
+
+Large libraries hide a lot of music you've never heard. Discover Weekly finds it for you, once a week, without prompts:
+
+1. **Taste profile** from your play history (most played lately and overall, favourite genres, recent and highly rated tracks) and, optionally, your Last.fm history.
+2. **Candidates**: artists in your library you've never played, plus unplayed albums by artists you know (default 70 / 30). With Last.fm, artists you've scrobbled count as known and Last.fm's similar artists rank candidates higher.
+3. **Two AI steps**: the AI first picks the artists and albums that fit you best, then picks and orders the tracks, with a reason for each and a title for the week. Every candidate has an id the AI must return, so every pick is a real track in your library.
+4. **One playlist** on your media server ("Discover Weekly" by default) gets its tracks replaced each week; each week is also saved to History.
+5. **Feedback**: picks you go on to play make similar picks likelier; artists you rate 1-2 stars are left out; artists from the last few weeks rest for a while.
+
+Turn it on under **Settings → Discover Weekly** (day, time, size, mix, playlist name, optional Last.fm user and [API key](https://www.last.fm/api/account/create)), or use **Generate now**. A run takes about a minute on a local model (two AI calls; ~70K tokens for a ~390K-track library). A failed run retries hourly.
+
 ### Local Library Cache
 
 MediaSage syncs your music library to a local SQLite database. After a one-time sync (about 30 seconds to 2 minutes for 20,000 tracks), all library operations—filtering, counting, sending to AI—happen locally in milliseconds instead of waiting on the media server.
@@ -342,6 +354,12 @@ Environment variables are optional, for scripted or automated installs. A variab
 | `LIBRARY_RETRY_MINUTES` | Wait this long after a failed sync before trying again (default: 30) |
 | `PLEX_TIMEOUT` | Seconds to wait for a Plex request (default: 300) |
 | `PLEX_SYNC_PAGE_SIZE` | Tracks per Plex request during a sync (default: 5000) |
+| `DISCOVER_WEEKLY_ENABLED` | `true` turns on the weekly Discover Weekly playlist. Also in Settings |
+| `DISCOVER_WEEKLY_DAY` / `DISCOVER_WEEKLY_TIME` | When it runs (default: `monday` / `06:00`, container time zone - set `TZ`) |
+| `DISCOVER_WEEKLY_TRACKS` | Tracks per week (default: 30) |
+| `DISCOVER_WEEKLY_TITLE` | Playlist name (default: Discover Weekly) |
+| `DISCOVER_WEEKLY_NEW_ARTIST_SHARE` | Share of tracks by artists you've never played, 0-1 (default: 0.7); the rest are unplayed albums by known artists |
+| `LASTFM_USER` / `LASTFM_API_KEY` | Optional Last.fm history and similar artists for Discover Weekly |
 | `OLLAMA_URL` | Ollama server URL (default: `http://localhost:11434`) |
 | `OLLAMA_CONTEXT_WINDOW` | Override detected context window for Ollama (default: 32768) |
 | `CUSTOM_LLM_URL` | Custom OpenAI-compatible API base URL |
@@ -535,6 +553,9 @@ Interactive documentation available at `/docs` when running.
 | `/api/recommend/questions` | POST | Generate clarifying questions |
 | `/api/recommend/generate` | POST | Generate album recommendations |
 | `/api/recommend/switch-mode` | POST | Switch library/discovery mode |
+| `/api/discover-weekly` | GET | Discover Weekly settings, next run, last run with picks and reasons |
+| `/api/discover-weekly/run` | POST | Generate this week's Discover Weekly now (background) |
+| `/api/discover-weekly/settings` | POST | Save Discover Weekly settings |
 | `/api/results` | GET | List saved result history |
 | `/api/results/{id}` | GET/DELETE | Get or delete a saved result |
 | `/api/plex/clients` | GET | List active Plex clients |

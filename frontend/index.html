@@ -868,6 +868,54 @@
                     </button>
                 </div>
 
+                <section class="settings-section" id="discover-weekly-section">
+                    <h3>Discover Weekly</h3>
+                    <p class="filter-hint">Every week, an AI-picked playlist of tracks from your library you've never played: mostly artists new to you, plus unplayed albums by artists you know. The same playlist is replaced each week.</p>
+                    <div class="form-group">
+                        <label class="checkbox-label"><input type="checkbox" id="dw-enabled"> Generate automatically</label>
+                    </div>
+                    <div class="form-group">
+                        <label for="dw-day">Day and time</label>
+                        <div class="dw-inline">
+                            <select id="dw-day">
+                                <option value="monday">Monday</option><option value="tuesday">Tuesday</option>
+                                <option value="wednesday">Wednesday</option><option value="thursday">Thursday</option>
+                                <option value="friday">Friday</option><option value="saturday">Saturday</option>
+                                <option value="sunday">Sunday</option>
+                            </select>
+                            <input type="time" id="dw-time" value="06:00" aria-label="Time">
+                        </div>
+                        <p class="filter-hint">Server time zone.</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="dw-track-count">Tracks</label>
+                        <input type="number" id="dw-track-count" min="5" max="100" value="30">
+                    </div>
+                    <div class="form-group">
+                        <label for="dw-new-share">New artists (%)</label>
+                        <input type="number" id="dw-new-share" min="0" max="100" step="5" value="70">
+                        <p class="filter-hint">The rest are unplayed albums by artists you already know.</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="dw-title">Playlist name</label>
+                        <input type="text" id="dw-title" value="Discover Weekly">
+                    </div>
+                    <div class="form-group">
+                        <label for="dw-lastfm-user">Last.fm user (optional)</label>
+                        <input type="text" id="dw-lastfm-user" placeholder="Your Last.fm username">
+                    </div>
+                    <div class="form-group">
+                        <label for="dw-lastfm-key">Last.fm API key (optional)</label>
+                        <input type="password" id="dw-lastfm-key" placeholder="From last.fm/api/account/create">
+                        <p class="filter-hint">Adds your Last.fm history to the taste profile, treats artists you've scrobbled as known, and uses Last.fm's similar artists.</p>
+                    </div>
+                    <p id="dw-status" class="filter-hint"></p>
+                    <div class="settings-actions">
+                        <button id="dw-save-btn" class="btn btn-secondary">Save Discover Weekly</button>
+                        <button id="dw-run-btn" class="btn btn-primary">Generate now</button>
+                    </div>
+                </section>
+
                 <section class="settings-section library-stats" id="library-stats-section" style="display: none;">
                     <h3>Library Statistics</h3>
                     <div id="library-stats"></div>
