@@ -197,7 +197,9 @@ class PlexClient(BaseMediaClient):
             return
 
         try:
-            self._server = PlexServer(self.url, self.token, timeout=30)
+            # 30 s is too short for one all-tracks request on large libraries (~380K tracks timed out and
+            # committed an empty cache). Configurable via PLEX_TIMEOUT (seconds), default 300.
+            self._server = PlexServer(self.url, self.token, timeout=int(os.environ.get("PLEX_TIMEOUT", "300")))
             self._library = self._server.library.section(self.music_library_name)
             self._error = None
         except Unauthorized:

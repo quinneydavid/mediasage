@@ -607,6 +607,13 @@ def sync_library(
         all_tracks = fetch_tracks()
         total = len(all_tracks)
         logger.info("Got %d tracks from the media server", total)
+        # The media server fetches swallow errors and return [] (a timeout looks like an empty library and would
+        # replace the cache with 0 tracks). Treat an empty or shrunken result as a failure so the rollback keeps the cache.
+        previous = get_sync_state()["track_count"] or 0
+        if total == 0 or (previous and total < previous * 0.5):
+            raise RuntimeError(f"media server returned {total} tracks (cache has {previous}) - keeping the cache")
+        if previous and hasattr(media_client, "get_all_raw_tracks") and not album_metadata:
+            raise RuntimeError("media server returned no album metadata - keeping the cache")
         if _cancel_sync.is_set():
             raise SyncCancelled
 
