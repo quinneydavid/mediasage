@@ -250,6 +250,9 @@ class FakeLLM:
 
     def analyze(self, prompt, system):
         self.prompts.append(prompt)
+        if "Propose 3 different themes" in prompt:
+            return self._resp(json.dumps({"themes": [
+                {"name": "Electronic Week", "description": "beats", "tags": ["electronic"], "anchors": ["Bicep"]}]}))
         ids = [line.split(" | ")[0] for line in prompt.splitlines() if line.startswith("A")]
         return self._resp(json.dumps({"artists": [{"id": i, "reason": f"why {i}"} for i in ids]}))
 
@@ -372,3 +375,72 @@ class TestRegeneration:
         cands = [c(1, "genre-only", 0.0, 9.0), c(2, "similar", 0.8, 1.0), c(3, "less-similar", 0.3, 5.0)]
         out = dw.top_up_artists([], cands, {"new": 2})
         assert [x.key for x in out] == ["similar", "less-similar"]
+
+
+
+class FakeLastFm:
+    """Electronic artists are tagged electronic, the rest rock."""
+    ELECTRONIC = {"overmono", "four tet", "burial", "bicep", "portishead"}
+
+    def __init__(self, *a, **k):
+        pass
+
+    def top_artists(self, period="overall", limit=50, page=1):
+        return [("Bicep", 40), ("Radiohead", 10)] if page == 1 else []
+
+    def known_artists(self, min_plays=5, max_pages=5):
+        return {"Bicep": 40, "Radiohead": 10}
+
+    def similar_artists(self, artist, limit=50):
+        return [("Overmono", 0.9)] if artist == "Bicep" else []
+
+    def artist_top_tracks(self, artist, limit=50):
+        return []
+
+    def artist_top_tags(self, artist):
+        return [("electronic", 100)] if artist.lower() in self.ELECTRONIC else [("rock", 100)]
+
+
+class TestThemes:
+    def test_themed_run_keeps_to_the_theme(self, db, user_yaml, fake_llm, monkeypatch):
+        monkeypatch.setattr(dw, "LastFmClient", FakeLastFm)
+        monkeypatch.setattr(dw, "MIN_THEME_POOL", 3)
+        monkeypatch.setattr(dw, "THEME_POOL_FACTOR", 0.5)
+        add_tracks(sample_library())
+        dw.save_settings({"enabled": True, "track_count": 5, "lastfm_user": "me", "lastfm_api_key": "k",
+                          "new_artist_share": 1.0})
+        out = dw.run(FakeMedia(), "manual")
+        assert out["success"], out
+        assert out["theme"]["name"] == "Electronic Week" and out["theme"]["tags"] == ["electronic"]
+        assert {p["artist"] for p in out["picks"]} <= {"Overmono", "Four Tet", "Burial", "Portishead"}
+        assert "THIS WEEK'S THEME: Electronic Week" in fake_llm.prompts[1]
+        assert dw.list_runs(1)[0]["theme"]["name"] == "Electronic Week"
+        assert dw.status()["recent_themes"] == ["Electronic Week"]
+
+    def test_too_small_theme_runs_without(self, db, user_yaml, fake_llm, monkeypatch):
+        monkeypatch.setattr(dw, "LastFmClient", FakeLastFm)
+        add_tracks(sample_library())                      # MIN_THEME_POOL 50 >> 4 electronic artists
+        dw.save_settings({"enabled": True, "track_count": 4, "lastfm_user": "me", "lastfm_api_key": "k"})
+        out = dw.run(FakeMedia(), "manual")
+        assert out["success"] and out["theme"] is None
+
+    def test_theme_off(self, db, user_yaml, fake_llm, monkeypatch):
+        monkeypatch.setattr(dw, "LastFmClient", FakeLastFm)
+        add_tracks(sample_library())
+        dw.save_settings({"enabled": True, "track_count": 4, "lastfm_user": "me", "lastfm_api_key": "k",
+                          "theme_mode": "off"})
+        out = dw.run(FakeMedia(), "manual")
+        assert out["success"] and out["theme"] is None
+        assert not any("Propose 3 different themes" in p for p in fake_llm.prompts)
+
+    def test_next_theme_is_used_once(self, db, user_yaml, fake_llm, monkeypatch):
+        monkeypatch.setattr(dw, "LastFmClient", FakeLastFm)
+        monkeypatch.setattr(dw, "MIN_THEME_POOL", 3)
+        monkeypatch.setattr(dw, "THEME_POOL_FACTOR", 0.5)
+        add_tracks(sample_library())
+        dw.save_settings({"enabled": True, "track_count": 5, "lastfm_user": "me", "lastfm_api_key": "k",
+                          "next_theme": "beats please"})
+        monkeypatch.setattr(dw, "_replace_section", lambda section: user_yaml.__setitem__("discover_weekly", section))
+        assert dw.run(FakeMedia(), "manual")["success"]
+        assert "beats please" in fake_llm.prompts[0]
+        assert dw.load_settings().next_theme == ""

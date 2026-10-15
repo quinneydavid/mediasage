@@ -989,6 +989,8 @@ class DiscoverWeeklySettingsRequest(BaseModel):
     new_artist_share: float | None = Field(None, ge=0, le=1)
     max_per_artist: int | None = Field(None, ge=1, le=5)
     order_by_sound: bool | None = None
+    theme_mode: str | None = None           # auto | off
+    next_theme: str | None = None           # wish for the next run's theme ("" clears it)
     lastfm_user: str | None = None
     lastfm_api_key: str | None = None
 
@@ -1002,6 +1004,7 @@ class DiscoverWeeklyStatusResponse(BaseModel):
     last_run: dict[str, Any] | None = None
     last_success_at: str | None = None
     playlist_id: str | None = None
+    recent_themes: list[str] = []
 
 
 class DiscoverWeeklyRunResponse(BaseModel):

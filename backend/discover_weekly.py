@@ -31,6 +31,8 @@ from backend.llm_client import get_llm_client, get_model_context_limit
 from backend.models import GenerateResponse, Track
 from backend.plex_client import simplify_string
 from backend.sonic_order import order_by_sound
+from backend.themes import (FIT_MIN, LANE_ARTISTS, RECENT_THEMES, Theme, choose_themes, fetch_tags, listening_lanes,
+                            theme_fit)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,8 @@ ENV = {
     "new_artist_share": "DISCOVER_WEEKLY_NEW_ARTIST_SHARE",
     "max_per_artist": "DISCOVER_WEEKLY_MAX_PER_ARTIST",
     "order_by_sound": "DISCOVER_WEEKLY_ORDER_BY_SOUND",
+    "theme_mode": "DISCOVER_WEEKLY_THEMES",
+    "next_theme": "DISCOVER_WEEKLY_NEXT_THEME",
     "lastfm_user": "LASTFM_USER",
     "lastfm_api_key": "LASTFM_API_KEY",
 }
@@ -77,6 +81,8 @@ class Settings:
     new_artist_share: float = 0.7
     max_per_artist: int = 1         # tracks by the same (main) artist in one week
     order_by_sound: bool = True     # reorder by the media server's sonic analysis so tracks blend (Plex)
+    theme_mode: str = "auto"        # auto = one style theme per week from what the listener plays (Last.fm); off
+    next_theme: str = ""            # the listener's wish for the next run's theme (used once)
     lastfm_user: str = ""
     lastfm_api_key: str = ""
     env_locked: list[str] = field(default_factory=list)
@@ -91,6 +97,7 @@ class Settings:
             "enabled": self.enabled, "day": self.day, "time": self.time, "track_count": self.track_count,
             "playlist_title": self.playlist_title, "new_artist_share": self.new_artist_share,
             "max_per_artist": self.max_per_artist, "order_by_sound": self.order_by_sound,
+            "theme_mode": self.theme_mode, "next_theme": self.next_theme,
             "lastfm_user": self.lastfm_user, "has_lastfm_api_key": bool(self.lastfm_api_key),
             "env_locked": self.env_locked,
         }
@@ -105,6 +112,11 @@ def _coerce(name: str, value: Any) -> Any:
         return max(1, min(5, int(value)))
     if name == "new_artist_share":
         return max(0.0, min(1.0, float(value)))
+    if name == "theme_mode":
+        mode = str(value).strip().lower()
+        if mode not in ("auto", "off"):
+            raise ValueError("theme_mode must be auto or off")
+        return mode
     if name == "day":
         day = str(value).strip().lower()
         if day not in DAYS:
@@ -135,6 +147,16 @@ def load_settings() -> Settings:
     return settings
 
 
+def _replace_section(section: dict[str, Any]) -> None:
+    """Rewrite the discover_weekly section without merging (save_user_config merges and cannot delete keys)."""
+    import yaml
+    from backend.config import USER_CONFIG_PATH
+    data = dict(load_user_yaml_config() or {})
+    data["discover_weekly"] = section
+    with open(USER_CONFIG_PATH, "w") as f:
+        yaml.dump(data, f, default_flow_style=False)
+
+
 def save_settings(updates: dict[str, Any]) -> Settings:
     """Validate and save settings (fields locked by environment variables are ignored)."""
     current = load_settings()
@@ -143,6 +165,11 @@ def save_settings(updates: dict[str, Any]) -> Settings:
         if name not in ENV or value is None or name in current.env_locked:
             continue
         clean[name] = _coerce(name, value)
+    if clean.get("next_theme") == "":   # an empty value is dropped by save_user_config: delete the key instead
+        clean.pop("next_theme")
+        section = dict((load_user_yaml_config() or {}).get("discover_weekly") or {})
+        if section.pop("next_theme", None) is not None:
+            _replace_section(section)
     if clean:
         save_user_config({"discover_weekly": clean})
     return load_settings()
@@ -168,6 +195,10 @@ def _ensure_tables(conn) -> None:
             result_id TEXT
         )
     """)
+    try:
+        conn.execute("ALTER TABLE discover_weekly_runs ADD COLUMN theme TEXT")
+    except Exception:
+        pass    # column exists
 
 
 def _record_start(trigger: str) -> int:
@@ -188,6 +219,8 @@ def _record_end(run_id: int, **fields: Any) -> None:
     fields["finished_at"] = _now().isoformat()
     if "picks" in fields:
         fields["picks"] = json.dumps(fields["picks"])
+    if isinstance(fields.get("theme"), dict):
+        fields["theme"] = json.dumps(fields["theme"])
     cols = ", ".join(f"{k} = ?" for k in fields)
     conn = library_cache.ensure_db_initialized()
     try:
@@ -200,6 +233,7 @@ def _record_end(run_id: int, **fields: Any) -> None:
 def _row_to_run(row) -> dict[str, Any]:
     run = dict(row)
     run["picks"] = json.loads(run["picks"]) if run.get("picks") else []
+    run["theme"] = json.loads(run["theme"]) if run.get("theme") else None
     return run
 
 
@@ -283,6 +317,7 @@ def status() -> dict[str, Any]:
         "last_run": runs[0] if runs else None,
         "last_success_at": last_success["finished_at"] if last_success else None,
         "playlist_id": last_success["playlist_id"] if last_success else None,
+        "recent_themes": [r["theme"]["name"] for r in list_runs(limit=8, status="success") if r.get("theme")][:6],
     }
 
 
@@ -496,6 +531,7 @@ class ArtistCandidate:
     score: float = 0.0
     similar_to: str = ""
     match: float = 0.0              # Last.fm similarity to an artist the listener plays (0 = none known)
+    fit: float = 0.0                # fit to this week's theme (0 without a theme)
 
     def line(self) -> str:
         what = f"{self.name} - album '{self.album}'" if self.album else self.name
@@ -512,7 +548,13 @@ def _decades(years: list[int]) -> str:
 
 
 def artist_candidates(view: LibraryView, profile: Profile, budget_lines: int, new_share: float,
-                      rng: random.Random, exclude_recent: bool = True) -> list[ArtistCandidate]:
+                      rng: random.Random, exclude_recent: bool = True, fit_by_key: dict[str, float] | None = None,
+                      tags_by_key: dict[str, list[tuple[str, int]]] | None = None) -> list[ArtistCandidate]:
+    """Never-played artists ("new") and unplayed albums of known artists ("deep"), best first.
+
+    With a theme (fit_by_key), only artists that fit it are candidates, ranked by fit; their Last.fm tags replace the
+    broad library genres in what the AI sees.
+    """
     fav_genres = set(profile.genres[:15])
     new: list[ArtistCandidate] = []
     deep: list[ArtistCandidate] = []
@@ -522,10 +564,18 @@ def artist_candidates(view: LibraryView, profile: Profile, budget_lines: int, ne
         genres = [g for g, _ in view.artist_genres.get(key, Counter()).most_common(4)]
         overlap = len(fav_genres.intersection(genres))
         match, seed = profile.similar.get(key, (0.0, ""))
+        fit = 0.0
+        if fit_by_key is not None:
+            fit = fit_by_key.get(key, 0.0)
+            if fit < FIT_MIN:
+                continue
+            overlap = fit * 6          # theme fit replaces the broad genre overlap in the ranking
+        if tags_by_key and tags_by_key.get(key):
+            genres = [t for t, _ in tags_by_key[key][:4]]
         if not (_credit_keys(view.artist_names[key]) | {key}) & profile.known:
             score = match * 3 + overlap * 0.5 + rng.random() * 0.5
             new.append(ArtistCandidate("", key, view.artist_names[key], "new", None, genres,
-                                       _decades(view.artist_years.get(key, [])), tracks, score, seed, match))
+                                       _decades(view.artist_years.get(key, [])), tracks, score, seed, match, fit))
             continue
         # Known artist: albums with no plays at all are deep cuts
         by_album: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -539,7 +589,7 @@ def artist_candidates(view: LibraryView, profile: Profile, budget_lines: int, ne
             years = [t["year"] for t in album_tracks if t["year"]]
             score = min(plays, 200) / 50 + overlap * 0.5 + rng.random() * 0.5
             deep.append(ArtistCandidate("", key, view.artist_names[key], "deep", album, genres,
-                                        _decades(years), album_tracks, score))
+                                        _decades(years), album_tracks, score, fit=fit))
     new.sort(key=lambda c: c.score, reverse=True)
     deep.sort(key=lambda c: c.score, reverse=True)
     n_new = int(budget_lines * new_share)
@@ -614,13 +664,15 @@ SYSTEM = (
 )
 
 
-def _stage_a_prompt(profile: Profile, candidates: list[ArtistCandidate], n_new: int, n_deep: int) -> str:
+def _stage_a_prompt(profile: Profile, candidates: list[ArtistCandidate], n_new: int, n_deep: int,
+                    theme: Theme | None = None) -> str:
     new_lines = "\n".join(c.line() for c in candidates if c.kind == "new") or "(none)"
+    theme_text = (theme.prompt_text() + "\nEvery pick must clearly fit this theme.\n\n") if theme else ""
     deep_lines = "\n".join(c.line() for c in candidates if c.kind == "deep") or "(none)"
     return f"""The listener's taste:
 {profile.describe()}
 
-NEW ARTISTS - in their library, never played (id | artist | genres | era | tracks | Last.fm similarity):
+{theme_text}NEW ARTISTS - in their library, never played (id | artist | styles | era | tracks | Last.fm similarity):
 {new_lines}
 
 DEEP CUTS - albums they have never played by artists they already know:
@@ -636,13 +688,14 @@ Return JSON: {{"artists": [{{"id": "A12", "reason": "one short sentence on why i
 
 
 def _stage_b_prompt(profile: Profile, chosen: list[ArtistCandidate], reasons: dict[str, str],
-                    tracks: list[dict[str, Any]], quotas: dict[str, int], max_per_artist: int = 1) -> str:
+                    tracks: list[dict[str, Any]], quotas: dict[str, int], max_per_artist: int = 1,
+                    theme: Theme | None = None) -> str:
     by_id = {c.id: c for c in chosen}
     lines = []
     for t in tracks:
         cand = by_id[t["artist_id"]]
         kind = "new artist" if cand.kind == "new" else "deep cut"
-        genres = ", ".join((t["genres"] or cand.genres)[:3]) or "no genre"
+        genres = ", ".join((cand.genres if theme else (t["genres"] or cand.genres))[:3]) or "no genre"
         extra = f" | similar to {cand.similar_to}" if cand.similar_to else ""
         lines.append(f"{t['id']} | {kind} | {t['artist']} - {t['title']} ({t['album']}, {t['year'] or '?'}) | "
                      f"{genres}{extra}")
@@ -650,12 +703,14 @@ def _stage_b_prompt(profile: Profile, chosen: list[ArtistCandidate], reasons: di
     artist_reasons = "\n".join(f"- {c.name}{' (' + c.album + ')' if c.album else ''}: {reasons[c.id]}"
                                for c in chosen if reasons.get(c.id)) or "(none)"
     count = sum(quotas.values())
+    theme_text = (theme.prompt_text() + "\nKeep the whole playlist inside this theme; title it after the theme.\n\n"
+                  if theme else "")
     per_artist_rule = ("exactly one track per artist - never two songs by the same artist (featured credits count "
                        "as that artist)" if max_per_artist == 1 else f"at most {max_per_artist} per artist")
     return f"""The listener's taste:
 {profile.describe()}
 
-Why each artist was picked:
+{theme_text}Why each artist was picked:
 {artist_reasons}
 
 Never-played tracks from their library (id | kind | artist - title (album, year) | genres | similarity):
@@ -731,12 +786,72 @@ def select_tracks(picked: list[dict[str, Any]], tracks: list[dict[str, Any]], qu
 # Run
 # =============================================================================
 
+MIN_THEME_POOL = 50        # never-played artists a theme needs (with 30 tracks, one per artist)
+THEME_POOL_FACTOR = 1.5    # ... and at least this many times the week's new-artist slots
+
+
+def pick_theme(llm: Any, view: LibraryView, profile: Profile, lastfm: LastFmClient, settings: Settings,
+               requested: str | None, recent: list[str], budget: int, rng: random.Random,
+               say: Callable[[str], None]) -> tuple[Theme | None, dict[str, float], dict[str, list], Any]:
+    """Choose this week's theme and return (theme, fit per artist key, Last.fm tags per key, AI response).
+
+    Tags come from Last.fm (cached for 60 days). Themes are tried best first; the first whose never-played pool is
+    big enough wins. No usable theme -> (None, ...) and the week runs without one.
+    """
+    names = view.artist_names
+    weights: dict[str, float] = {}
+    for key, plays in view.artist_plays.items():
+        if key not in SKIP_ARTISTS:
+            weights[key] = view.artist_recent.get(key, 0) * 3 + min(plays, 200)
+    try:
+        for name, plays in lastfm.top_artists("3month", 50):
+            key = _artist_key(name)
+            names.setdefault(key, name)
+            weights[key] = weights.get(key, 0) + plays
+    except LastFmError as e:
+        logger.info("Discover Weekly: no Last.fm 3-month artists (%s)", e)
+    lane_keys = [k for k, _ in sorted(weights.items(), key=lambda kv: kv[1], reverse=True)[:LANE_ARTISTS]]
+    candidate_keys = [k for k in view.unplayed if k not in SKIP_ARTISTS]
+    say(f"Last.fm tags for {len(set(lane_keys) | set(candidate_keys))} artists (cached after the first run)")
+    tags_by_key = fetch_tags(lastfm, [names[k] for k in dict.fromkeys(lane_keys + candidate_keys)],
+                             _artist_key, _primary_artist, say)
+    lanes = listening_lanes({k: weights[k] for k in lane_keys}, names, tags_by_key)
+    if not lanes:
+        return None, {}, tags_by_key, None
+    vocabulary = {t for tags in tags_by_key.values() for t, _ in tags}
+    known = {names[k].lower(): names[k] for k in lane_keys}
+    themes, response = choose_themes(llm, lanes, recent, requested, vocabulary, known)
+    # never-played artists the week needs (new-artist slots / per-artist cap), with room for the AI to choose
+    needed_new = math.ceil(settings.track_count * settings.new_artist_share / settings.max_per_artist)
+    need = max(MIN_THEME_POOL, math.ceil(needed_new * THEME_POOL_FACTOR))
+    for theme in themes[:6]:
+        anchor_match: dict[str, float] = {}
+        for anchor in theme.anchors:
+            try:
+                for name, match in lastfm.similar_artists(_primary_artist(anchor), 100):
+                    key = _artist_key(name)
+                    anchor_match[key] = max(anchor_match.get(key, 0.0), match)
+            except LastFmError:
+                pass
+        fit = {k: theme_fit(tags_by_key.get(k, []), theme, anchor_match.get(k, 0.0)) for k in candidate_keys}
+        pool = artist_candidates(view, profile, budget, settings.new_artist_share, rng, fit_by_key=fit,
+                                 tags_by_key=tags_by_key)
+        n_new = sum(1 for c in pool if c.kind == "new")
+        say(f"theme '{theme.name}' ({', '.join(theme.tags)}): {n_new} new artists, "
+            f"{len(pool) - n_new} unplayed albums fit")
+        if n_new >= need:
+            return theme, fit, tags_by_key, response
+    say("no theme has enough unplayed music this week - running without a theme")
+    return None, {}, tags_by_key, response
+
+
 def _lastfm_client(settings: Settings) -> LastFmClient | None:
     return LastFmClient(settings.lastfm_api_key, settings.lastfm_user) if settings.lastfm_enabled else None
 
 
 def generate(settings: Settings, media_client: Any, now: datetime | None = None,
-             rng: random.Random | None = None, on_progress: Callable[[str], None] | None = None) -> dict[str, Any]:
+             rng: random.Random | None = None, on_progress: Callable[[str], None] | None = None,
+             theme_request: str | None = None) -> dict[str, Any]:
     """Build this week's playlist and publish it. Returns the run's fields (raises on failure)."""
     rng = rng or random.Random()
     say = on_progress or (lambda msg: logger.info("Discover Weekly: %s", msg))
@@ -746,7 +861,8 @@ def generate(settings: Settings, media_client: Any, now: datetime | None = None,
     if not library_cache.has_cached_tracks():
         raise RuntimeError("the library cache is empty")
 
-    previous = _previous_picks(before=last_scheduled_at(settings, now))
+    slot = last_scheduled_at(settings, now)
+    previous = _previous_picks(before=slot)
     say("reading the library")
     view = load_library(now, watch_keys={p["rating_key"] for p in previous if p.get("rating_key")})
     lastfm = _lastfm_client(settings)
@@ -755,16 +871,27 @@ def generate(settings: Settings, media_client: Any, now: datetime | None = None,
 
     context = get_model_context_limit(llm.config.model_analysis, llm.config)
     budget = max(100, min(2500, int(context * 0.5) // TOKENS_PER_LINE))
-    candidates = artist_candidates(view, profile, budget, settings.new_artist_share, rng)
+    theme, fit, tags_by_key, resp_theme = None, None, None, None
+    requested = (theme_request or settings.next_theme or "").strip() or None
+    if lastfm and (settings.theme_mode == "auto" or requested):
+        recent = [r["theme"]["name"] for r in list_runs(limit=RECENT_THEMES + 5, status="success")
+                  if r.get("theme") and datetime.fromisoformat(r["started_at"]) < slot][:RECENT_THEMES]
+        theme, fit, tags_by_key, resp_theme = pick_theme(llm, view, profile, lastfm, settings, requested, recent,
+                                                         budget, rng, say)
+        if not theme:
+            fit = None
+    candidates = artist_candidates(view, profile, budget, settings.new_artist_share, rng, fit_by_key=fit,
+                                   tags_by_key=tags_by_key)
     if len(candidates) < STAGE_A_ARTISTS:   # small library: artists from recent weeks may come back
-        candidates = artist_candidates(view, profile, budget, settings.new_artist_share, rng, exclude_recent=False)
+        candidates = artist_candidates(view, profile, budget, settings.new_artist_share, rng, exclude_recent=False,
+                                       fit_by_key=fit, tags_by_key=tags_by_key)
     if not candidates:
         raise RuntimeError("no unplayed artists left to choose from")
     # enough artists that the playlist fills up with max_per_artist tracks each, plus spares
     stage_a = max(STAGE_A_ARTISTS, math.ceil(settings.track_count / settings.max_per_artist * 1.4))
     n_new = round(stage_a * settings.new_artist_share)
     say(f"stage A: {len(candidates)} candidate artists/albums, picking {stage_a}")
-    resp_a = llm.analyze(_stage_a_prompt(profile, candidates, n_new, stage_a - n_new), SYSTEM)
+    resp_a = llm.analyze(_stage_a_prompt(profile, candidates, n_new, stage_a - n_new, theme), SYSTEM)
     data_a = _parse(llm, resp_a)
     by_id = {c.id: c for c in candidates}
     reasons: dict[str, str] = {}
@@ -789,7 +916,8 @@ def generate(settings: Settings, media_client: Any, now: datetime | None = None,
     available = {kind: min(n, len(artists_by_kind[kind]) * settings.max_per_artist)
                  for kind, n in Counter(t["kind"] for t in tracks).items()}
     quotas = split_quotas(settings.track_count, settings.new_artist_share, available)
-    resp_b = llm.generate(_stage_b_prompt(profile, chosen, reasons, tracks, quotas, settings.max_per_artist), SYSTEM)
+    resp_b = llm.generate(_stage_b_prompt(profile, chosen, reasons, tracks, quotas, settings.max_per_artist, theme),
+                          SYSTEM)
     data_b = _parse(llm, resp_b)
     selected = select_tracks(data_b.get("tracks") or [], tracks, quotas, [c.id for c in chosen],
                              settings.max_per_artist)
@@ -817,15 +945,17 @@ def generate(settings: Settings, media_client: Any, now: datetime | None = None,
             "rating_key": t["rating_key"], "artist": t["artist"], "title": t["title"], "album": t["album"],
             "year": t["year"], "kind": t["kind"], "reason": reason or artist_reason,
         })
-    description = f"{title} - week of {week}. {intro}".strip()
+    theme_part = f" - this week: {theme.name}" if theme else ""
+    description = f"{title}{theme_part} - week of {week}. {intro}".strip()
     say(f"publishing {len(picks)} tracks")
     playlist_id = publish(media_client, settings.playlist_title, [p["rating_key"] for p in picks], description)
 
     model_tracks = [Track(rating_key=t["rating_key"], title=t["title"], artist=t["artist"], album=t["album"],
                           duration_ms=t["duration_ms"] or 0, year=t["year"], genres=t["genres"],
                           art_url=f"/api/art/{t['rating_key']}") for t, _ in selected]
-    tokens = resp_a.total_tokens + resp_b.total_tokens
-    cost = resp_a.estimated_cost() + resp_b.estimated_cost()
+    responses = [r for r in (resp_theme, resp_a, resp_b) if r is not None]
+    tokens = sum(r.total_tokens for r in responses)
+    cost = sum(r.estimated_cost() for r in responses)
     snapshot = GenerateResponse(
         tracks=model_tracks, token_count=tokens, estimated_cost=cost, playlist_title=title, narrative=intro,
         track_reasons={p["rating_key"]: p["reason"] for p in picks if p["reason"]},
@@ -835,13 +965,13 @@ def generate(settings: Settings, media_client: Any, now: datetime | None = None,
         result_id = library_cache.save_result(
             result_type=RESULT_TYPE, title=title, prompt=f"{settings.playlist_title} - week of {week}",
             snapshot=snapshot.model_dump(mode="json"), track_count=len(picks),
-            art_rating_key=picks[0]["rating_key"], subtitle=f"{settings.playlist_title} · {week} · "
-                                                           f"{len(picks)} tracks",
+            art_rating_key=picks[0]["rating_key"],
+            subtitle=f"{settings.playlist_title} · {(theme.name + ' · ') if theme else ''}{week} · {len(picks)} tracks",
         )
     except Exception as e:      # history is a nicety; the playlist is already published
         logger.warning("Discover Weekly: could not save to history: %s", e)
     return {"playlist_id": playlist_id, "title": title, "intro": intro, "picks": picks, "result_id": result_id,
-            "tokens": tokens}
+            "tokens": tokens, "theme": theme.to_dict() if theme else None}
 
 
 def publish(media_client: Any, playlist_title: str, rating_keys: list[str], description: str) -> str:
@@ -859,8 +989,11 @@ def publish(media_client: Any, playlist_title: str, rating_keys: list[str], desc
     return str(result.get("playlist_id"))
 
 
-def run(media_client: Any, trigger: str = "schedule") -> dict[str, Any]:
-    """Run once (blocking). Only one run at a time; the outcome is recorded either way."""
+def run(media_client: Any, trigger: str = "schedule", theme: str | None = None) -> dict[str, Any]:
+    """Run once (blocking). Only one run at a time; the outcome is recorded either way.
+
+    theme: the listener's wish for this run's theme (otherwise the saved next_theme, otherwise automatic).
+    """
     global _running
     with _run_lock:
         if _running:
@@ -872,9 +1005,11 @@ def run(media_client: Any, trigger: str = "schedule") -> dict[str, Any]:
         settings = load_settings()
         if not media_client or not media_client.is_connected():
             raise RuntimeError("media server not connected")
-        out = generate(settings, media_client)
+        out = generate(settings, media_client, theme_request=theme)
         _record_end(run_id, status="success", playlist_id=out["playlist_id"], title=out["title"],
-                    intro=out["intro"], picks=out["picks"], result_id=out["result_id"])
+                    intro=out["intro"], picks=out["picks"], result_id=out["result_id"], theme=out["theme"])
+        if settings.next_theme and not theme:
+            save_settings({"next_theme": ""})      # a wished-for theme is used once
         logger.info("Discover Weekly: published '%s' (%d tracks, %d tokens)", out["title"], len(out["picks"]),
                     out["tokens"])
         return {"success": True, **out}
