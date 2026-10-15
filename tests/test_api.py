@@ -453,36 +453,64 @@ class TestArtistEndpoints:
 
 
 class TestLibraryFreshness:
-    """The library cache re-syncs once it's older than the auto-refresh setting (default 24 hours)."""
+    """The library cache keeps itself fresh: full sync when empty/interrupted/stale, incremental otherwise."""
 
-    def _run(self, *, stale=True, connected=True, syncing=False, hours=24.0):
-        from backend.main import _sync_if_stale
+    def _run(self, *, stale=True, resync=False, incremental=False, connected=True, syncing=False, hours=24.0,
+             error=None, last_attempt_at=None, paged=True):
+        from backend.main import _sync_if_due
 
         config = create_mock_config()
         config.library_sync_hours = hours
         media_client = MagicMock(is_connected=MagicMock(return_value=connected))
+        if not paged:
+            del media_client.iter_raw_tracks
         with patch("backend.main.get_config", return_value=config), \
              patch("backend.main.library_cache") as cache, \
              patch("backend.main.get_current_media_client", return_value=media_client), \
              patch("backend.main.asyncio.to_thread", new=MagicMock()) as to_thread, \
              patch("backend.main.asyncio.create_task"):
-            cache.get_sync_progress.return_value = {"is_syncing": syncing}
+            cache.get_sync_progress.return_value = {
+                "is_syncing": syncing, "error": error, "last_attempt_at": last_attempt_at,
+            }
+            cache.needs_resync.return_value = resync
             cache.is_cache_stale.return_value = stale
-            _sync_if_stale()
+            cache.incremental_due.return_value = incremental
+            _sync_if_due()
         return cache, to_thread
 
     def test_syncs_stale_cache(self):
         cache, to_thread = self._run()
         cache.is_cache_stale.assert_called_once_with(24.0)
+        assert to_thread.call_args.args == (cache.sync_library, to_thread.call_args.args[1])
+
+    def test_syncs_empty_or_interrupted_cache(self):
+        cache, to_thread = self._run(stale=False, resync=True)
+        cache.is_cache_stale.assert_not_called()
         assert to_thread.call_args.args[0] is cache.sync_library
+        assert len(to_thread.call_args.args) == 2   # full sync
 
     def test_leaves_fresh_cache(self):
         _, to_thread = self._run(stale=False)
         to_thread.assert_not_called()
 
+    def test_incremental_sync_when_due(self):
+        cache, to_thread = self._run(stale=False, incremental=True)
+        assert to_thread.call_args.args[0] is cache.sync_library
+        assert to_thread.call_args.args[-1] is True   # incremental=True
+
+    def test_no_incremental_without_paged_client(self):
+        _, to_thread = self._run(stale=False, incremental=True, paged=False)
+        to_thread.assert_not_called()
+
     def test_skips_when_disconnected_or_already_syncing(self):
         assert not self._run(connected=False)[1].called
         assert not self._run(syncing=True)[1].called
+
+    def test_backs_off_after_a_recent_failure(self):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        assert not self._run(error="boom", last_attempt_at=now)[1].called
+        assert self._run(error="boom", last_attempt_at="2000-01-01T00:00:00+00:00")[1].called
 
     def test_custom_interval_and_off(self):
         cache, _ = self._run(hours=168.0)

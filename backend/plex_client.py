@@ -6,7 +6,7 @@ import os
 import re
 import threading
 import time
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlparse
 
 from plexapi.exceptions import NotFound, Unauthorized
@@ -299,6 +299,55 @@ class PlexClient(BaseMediaClient):
         except Exception as e:
             logger.exception("Failed to get all tracks: %s", e)
             return []
+
+    # Paged, filterable track listing + batched album/artist metadata for library_cache.sync_library.
+    # Previously all tracks were fetched in one request and then read track.genres / lastViewedAt / userRating on
+    # partial plexapi objects: a None/[] value makes plexapi GET /library/metadata/<key> for EVERY track (and every
+    # album in get_all_albums_metadata) = ~440K requests per sync on a ~386K-track library (hours), and a track deleted
+    # between listing and processing was a 404 that aborted the whole sync. Read fields with vars() instead.
+    SYNC_PAGE_SIZE = int(os.environ.get("PLEX_SYNC_PAGE_SIZE", "5000"))
+    METADATA_BATCH = 500   # keys per /library/metadata/k1,k2,... request (1000 tested fine)
+
+    def iter_raw_tracks(self, updated_since: int | None = None) -> Iterator[list[Any]]:
+        """Yield the music library's tracks one page at a time (raw plexapi objects, read them with vars()).
+
+        updated_since: unix time; only tracks added or changed since then (incremental sync). Errors propagate -
+        a sync must fail rather than commit a partial listing.
+        """
+        if not self._library:
+            raise RuntimeError(self._error or "Plex not connected")
+        key = f"/library/sections/{self._library.key}/all?type=10&sort=addedAt:asc"
+        if updated_since:
+            key += f"&updatedAt>>={int(updated_since)}"
+        start, size = 0, self.SYNC_PAGE_SIZE
+        while True:
+            page = self._library.fetchItems(key, container_start=start, container_size=size, maxresults=size)
+            if not page:
+                return
+            yield page
+            if len(page) < size:
+                return
+            start += size
+
+    def fetch_metadata(self, rating_keys: list[str]) -> dict[str, dict[str, Any]]:
+        """year + genres for albums/artists by rating key, batched (keys Plex no longer has are left out)."""
+        if not self._server:
+            raise RuntimeError(self._error or "Plex not connected")
+        out: dict[str, dict[str, Any]] = {}
+        keys = [k for k in rating_keys if k]
+        for i in range(0, len(keys), self.METADATA_BATCH):
+            chunk = keys[i : i + self.METADATA_BATCH]
+            try:
+                data = self._server.query("/library/metadata/" + ",".join(chunk))
+            except NotFound:
+                continue   # none of the chunk exists any more
+            for el in data:
+                year = el.attrib.get("year")
+                out[str(el.attrib.get("ratingKey"))] = {
+                    "year": int(year) if year and year.isdigit() else None,
+                    "genres": [g.attrib.get("tag") for g in el if g.tag == "Genre" and g.attrib.get("tag")],
+                }
+        return out
 
     def get_all_albums_metadata(self) -> dict[str, dict[str, Any]]:
         """Fetch all albums and return mapping of rating_key -> metadata.
