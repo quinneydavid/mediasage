@@ -419,9 +419,13 @@ class Profile:
         return "\n".join(parts)
 
 
-def _previous_picks(weeks: int = 8) -> list[dict[str, Any]]:
+def _previous_picks(weeks: int = 8, before: datetime | None = None) -> list[dict[str, Any]]:
+    """Picks of earlier weeks. Runs since `before` (this week's slot) are left out: a regeneration replaces this
+    week's playlist, so its artists must not be rested as if they were last week's."""
     picks = []
-    for run in list_runs(limit=weeks, status="success"):
+    for run in list_runs(limit=weeks + 5, status="success"):
+        if before and datetime.fromisoformat(run["started_at"]) >= before:
+            continue
         picks.extend(run["picks"])
     return picks
 
@@ -491,6 +495,7 @@ class ArtistCandidate:
     tracks: list[dict[str, Any]]
     score: float = 0.0
     similar_to: str = ""
+    match: float = 0.0              # Last.fm similarity to an artist the listener plays (0 = none known)
 
     def line(self) -> str:
         what = f"{self.name} - album '{self.album}'" if self.album else self.name
@@ -520,7 +525,7 @@ def artist_candidates(view: LibraryView, profile: Profile, budget_lines: int, ne
         if not (_credit_keys(view.artist_names[key]) | {key}) & profile.known:
             score = match * 3 + overlap * 0.5 + rng.random() * 0.5
             new.append(ArtistCandidate("", key, view.artist_names[key], "new", None, genres,
-                                       _decades(view.artist_years.get(key, [])), tracks, score, seed))
+                                       _decades(view.artist_years.get(key, [])), tracks, score, seed, match))
             continue
         # Known artist: albums with no plays at all are deep cuts
         by_album: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -546,9 +551,12 @@ def artist_candidates(view: LibraryView, profile: Profile, budget_lines: int, ne
 
 def top_up_artists(chosen: list[ArtistCandidate], candidates: list[ArtistCandidate],
                    targets: dict[str, int]) -> list[ArtistCandidate]:
-    """Fill each kind up to its target with the best-ranked candidates the AI didn't pick (local models often return
-    fewer ids than asked). Candidates are already ranked by Last.fm similarity, genre fit and play history."""
+    """Fill each kind up to its target with the best candidates the AI didn't pick (local models often return fewer
+    ids than asked). New artists with Last.fm similarity to what the listener plays come first, strongest match
+    first; broad genre overlap alone (tags like "Pop/Rock" match almost anything) is the last resort. Deep cuts keep
+    their play-history ranking."""
     out = list(chosen)
+    candidates = sorted(candidates, key=lambda c: (c.match > 0, c.match, c.score), reverse=True)
     used_ids = {c.id for c in out}
     used_artists = {c.key for c in out}
     for kind, target in targets.items():
@@ -738,7 +746,7 @@ def generate(settings: Settings, media_client: Any, now: datetime | None = None,
     if not library_cache.has_cached_tracks():
         raise RuntimeError("the library cache is empty")
 
-    previous = _previous_picks()
+    previous = _previous_picks(before=last_scheduled_at(settings, now))
     say("reading the library")
     view = load_library(now, watch_keys={p["rating_key"] for p in previous if p.get("rating_key")})
     lastfm = _lastfm_client(settings)
@@ -768,7 +776,9 @@ def generate(settings: Settings, media_client: Any, now: datetime | None = None,
             reasons[cid] = str(item.get("reason") or "").strip()
     if len(chosen) < min(5, len(candidates)):
         raise RuntimeError(f"the AI picked only {len(chosen)} usable artists")
+    n_ai = len(chosen)
     chosen = top_up_artists(chosen, candidates, {"new": n_new, "deep": stage_a - n_new})
+    say(f"stage A: the AI picked {n_ai}, topped up {len(chosen) - n_ai} from the ranking")
 
     tracks = track_candidates(chosen, lastfm, rng)
     say(f"stage B: {len(tracks)} candidate tracks from {len(chosen)} artists/albums")
