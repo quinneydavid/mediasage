@@ -68,3 +68,15 @@ def test_requested_theme_goes_into_the_prompt():
 def test_theme_roundtrip():
     t = th.Theme("A", "b", ["house"], ["Bicep"], "auto")
     assert th.Theme.from_dict(t.to_dict()) == t and th.Theme.from_dict(None) is None
+
+
+def test_specificity_and_broad_tags():
+    tags = {f"a{i}": [("electronic", 100)] for i in range(40)}
+    tags.update({f"b{i}": [("electronic", 100), ("deep house", 90)] for i in range(2)})
+    spec = th.tag_specificity(tags)
+    assert spec["deep house"] == 1.0 and spec["electronic"] < 0.1
+    llm = FakeLLM({"themes": [{"name": "X", "tags": ["electronic", "deep house"]}]})
+    themes, _ = th.choose_themes(llm, LANES, [], None, {"electronic", "deep house"}, {}, th.tag_share(tags))
+    assert themes[0].tags == ["deep house"]                     # the umbrella tag is dropped
+    theme = th.Theme("House", "", ["electronic"])
+    assert th.theme_fit([("electronic", 100)], theme, specificity=spec) < 0.1

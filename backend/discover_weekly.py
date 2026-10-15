@@ -32,7 +32,7 @@ from backend.models import GenerateResponse, Track
 from backend.plex_client import simplify_string
 from backend.sonic_order import order_by_sound
 from backend.themes import (FIT_MIN, LANE_ARTISTS, RECENT_THEMES, Theme, choose_themes, fetch_tags, listening_lanes,
-                            theme_fit)
+                            tag_share, tag_specificity, theme_fit)
 
 logger = logging.getLogger(__name__)
 
@@ -815,12 +815,13 @@ def pick_theme(llm: Any, view: LibraryView, profile: Profile, lastfm: LastFmClie
     say(f"Last.fm tags for {len(set(lane_keys) | set(candidate_keys))} artists (cached after the first run)")
     tags_by_key = fetch_tags(lastfm, [names[k] for k in dict.fromkeys(lane_keys + candidate_keys)],
                              _artist_key, _primary_artist, say)
-    lanes = listening_lanes({k: weights[k] for k in lane_keys}, names, tags_by_key)
+    specificity = tag_specificity(tags_by_key)
+    lanes = listening_lanes({k: weights[k] for k in lane_keys}, names, tags_by_key, specificity=specificity)
     if not lanes:
         return None, {}, tags_by_key, None
     vocabulary = {t for tags in tags_by_key.values() for t, _ in tags}
     known = {names[k].lower(): names[k] for k in lane_keys}
-    themes, response = choose_themes(llm, lanes, recent, requested, vocabulary, known)
+    themes, response = choose_themes(llm, lanes, recent, requested, vocabulary, known, tag_share(tags_by_key))
     # never-played artists the week needs (new-artist slots / per-artist cap), with room for the AI to choose
     needed_new = math.ceil(settings.track_count * settings.new_artist_share / settings.max_per_artist)
     need = max(MIN_THEME_POOL, math.ceil(needed_new * THEME_POOL_FACTOR))
@@ -833,7 +834,8 @@ def pick_theme(llm: Any, view: LibraryView, profile: Profile, lastfm: LastFmClie
                     anchor_match[key] = max(anchor_match.get(key, 0.0), match)
             except LastFmError:
                 pass
-        fit = {k: theme_fit(tags_by_key.get(k, []), theme, anchor_match.get(k, 0.0)) for k in candidate_keys}
+        fit = {k: theme_fit(tags_by_key.get(k, []), theme, anchor_match.get(k, 0.0), specificity)
+               for k in candidate_keys}
         pool = artist_candidates(view, profile, budget, settings.new_artist_share, rng, fit_by_key=fit,
                                  tags_by_key=tags_by_key)
         n_new = sum(1 for c in pool if c.kind == "new")
@@ -843,6 +845,21 @@ def pick_theme(llm: Any, view: LibraryView, profile: Profile, lastfm: LastFmClie
             return theme, fit, tags_by_key, response
     say("no theme has enough unplayed music this week - running without a theme")
     return None, {}, tags_by_key, response
+
+
+def _fallback_reason(cand: ArtistCandidate | None, theme: Theme | None) -> str:
+    """A short reason for a track the AI didn't explain (topped up from the ranking)."""
+    if not cand:
+        return ""
+    styles = ", ".join(cand.genres[:2])
+    if cand.kind == "deep":
+        base = f"An unplayed album by {cand.name}, an artist you already play"
+    elif cand.similar_to:
+        base = f"Last.fm puts {cand.name} close to {cand.similar_to}"
+    else:
+        base = f"{cand.name}, new to you"
+    tail = f" - {styles}" if styles else ""
+    return f"{base}{tail}{', for this week' + chr(39) + 's ' + theme.name if theme else ''}."
 
 
 def _lastfm_client(settings: Settings) -> LastFmClient | None:
@@ -938,9 +955,10 @@ def generate(settings: Settings, media_client: Any, now: datetime | None = None,
     title = str(data_b.get("title") or data_b.get("playlist_title") or data_b.get("name") or "").strip()
     title = title or f"Week of {week}"
     intro = str(data_b.get("intro") or data_b.get("description") or data_b.get("narrative") or "").strip()
+    chosen_by_id = {c.id: c for c in chosen}
     picks = []
     for t, reason in selected:
-        artist_reason = reasons.get(t["artist_id"], "")
+        artist_reason = reasons.get(t["artist_id"], "") or _fallback_reason(chosen_by_id.get(t["artist_id"]), theme)
         picks.append({
             "rating_key": t["rating_key"], "artist": t["artist"], "title": t["title"], "album": t["album"],
             "year": t["year"], "kind": t["kind"], "reason": reason or artist_reason,
