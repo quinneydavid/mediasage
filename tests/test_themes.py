@@ -80,3 +80,18 @@ def test_specificity_and_broad_tags():
     assert themes[0].tags == ["deep house"]                     # the umbrella tag is dropped
     theme = th.Theme("House", "", ["electronic"])
     assert th.theme_fit([("electronic", 100)], theme, specificity=spec) < 0.1
+
+
+def test_umbrella_genres_are_broad_even_when_rare():
+    # a varied library: "indie" and "dance" each on only a few percent of artists
+    tags = {f"a{i}": [("stoner rock", 100)] for i in range(200)}
+    tags.update({f"b{i}": [("indie", 100), ("dance", 80), ("house", 70)] for i in range(5)})
+    spec = th.tag_specificity(tags)
+    assert spec["indie"] <= th.UMBRELLA_WEIGHT and spec["dance"] <= th.UMBRELLA_WEIGHT and spec["house"] == 1.0
+    llm = FakeLLM({"themes": [{"name": "Neon", "tags": ["house", "indie", "dance"]},
+                              {"name": "Indie", "tags": ["indie", "rock"]}]})
+    themes, _ = th.choose_themes(llm, LANES, [], None, {"house", "indie", "dance", "rock"}, {}, th.tag_share(tags))
+    assert themes[0].tags == ["house"]                          # umbrellas dropped next to a real style
+    assert themes[1].tags == ["indie", "rock"]                  # kept when nothing more specific was given
+    assert th.theme_fit([("indie", 100), ("dance", 100)], th.Theme("N", "", ["house", "indie", "dance"]),
+                        specificity=spec) <= 2 * th.UMBRELLA_WEIGHT
