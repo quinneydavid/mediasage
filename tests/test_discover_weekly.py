@@ -301,7 +301,7 @@ class TestRun:
         assert first["success"], first
         assert len(first["picks"]) == 8
         assert media.created[0][0] == "Discover Weekly"
-        assert all(p["reason"] for p in first["picks"])
+        assert all(p["reason"] for p in first["picks"])        # AI reasons, or a fallback for top-ups
         assert {p["kind"] for p in first["picks"]} == {"new", "deep"}
         assert not any(k in {p["rating_key"] for p in first["picks"]} for k in ("va1", "live1", "rh0"))
         assert dw.status()["playlist_id"] == "pl1"
@@ -406,6 +406,7 @@ class TestThemes:
         monkeypatch.setattr(dw, "LastFmClient", FakeLastFm)
         monkeypatch.setattr(dw, "MIN_THEME_POOL", 3)
         monkeypatch.setattr(dw, "THEME_POOL_FACTOR", 0.5)
+        monkeypatch.setattr(dw, "FIT_MIN", 0.1)     # 9 artists: every tag is "broad" in this tiny library
         add_tracks(sample_library())
         dw.save_settings({"enabled": True, "track_count": 5, "lastfm_user": "me", "lastfm_api_key": "k",
                           "new_artist_share": 1.0})

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable
@@ -21,6 +22,26 @@ LANE_ARTISTS = 300          # most-played artists whose tags make up the listeni
 FIT_MIN = 0.3               # minimum theme fit for a candidate (sum of matching tag weights / 100)
 ANCHOR_WEIGHT = 1.0         # fit added per unit of Last.fm similarity to an anchor artist
 RECENT_THEMES = 4           # themes of this many earlier weeks are avoided
+BROAD_TAG_SHARE = 0.2       # a tag on more than this share of artists is too broad to define a theme on its own
+SPECIFIC_IDF = 3.0          # tags at least this rare (idf; ~5 % of artists) count fully, broader ones less
+
+
+def tag_specificity(tags_by_key: dict[str, list[tuple[str, int]]]) -> dict[str, float]:
+    """0-1 per tag: how distinctive it is in this library. "electronic" on a third of all artists says little
+    (~0.4); "deep house" or "trip-hop" on 2-3 % says a lot (1.0)."""
+    df: Counter = Counter()
+    for tags in tags_by_key.values():
+        df.update({t for t, _ in tags})
+    n = max(1, sum(1 for tags in tags_by_key.values() if tags))
+    return {tag: min(1.0, math.log(n / count) / SPECIFIC_IDF) for tag, count in df.items()}
+
+
+def tag_share(tags_by_key: dict[str, list[tuple[str, int]]]) -> dict[str, float]:
+    df: Counter = Counter()
+    for tags in tags_by_key.values():
+        df.update({t for t, _ in tags})
+    n = max(1, sum(1 for tags in tags_by_key.values() if tags))
+    return {tag: count / n for tag, count in df.items()}
 
 
 @dataclass
@@ -66,22 +87,28 @@ def fetch_tags(lastfm: LastFmClient, names: Iterable[str], key: Callable[[str], 
 
 
 def listening_lanes(artist_weights: dict[str, float], names: dict[str, str],
-                    tags_by_key: dict[str, list[tuple[str, int]]], top: int = 25) -> list[dict[str, Any]]:
-    """Style lanes of the listener: tag -> weight (artist listening weight x tag strength) and its top artists."""
+                    tags_by_key: dict[str, list[tuple[str, int]]], top: int = 25,
+                    specificity: dict[str, float] | None = None) -> list[dict[str, Any]]:
+    """Style lanes of the listener: tag -> weight (artist listening weight x tag strength x tag specificity) and
+    its top artists. Specificity keeps broad tags ("electronic", "indie") from swamping distinct styles."""
     weight: Counter = Counter()
     artists: dict[str, Counter] = {}
     for key, w in artist_weights.items():
         for tag, strength in tags_by_key.get(key, []):
-            contribution = w * strength / 100
+            contribution = w * strength / 100 * (specificity.get(tag, 1.0) if specificity else 1.0)
             weight[tag] += contribution
             artists.setdefault(tag, Counter())[names.get(key, key)] += contribution
     return [{"tag": tag, "weight": round(w, 1), "artists": [a for a, _ in artists[tag].most_common(6)]}
             for tag, w in weight.most_common(top)]
 
 
-def theme_fit(tags: list[tuple[str, int]], theme: Theme, anchor_match: float = 0.0) -> float:
+def theme_fit(tags: list[tuple[str, int]], theme: Theme, anchor_match: float = 0.0,
+              specificity: dict[str, float] | None = None) -> float:
+    """How well an artist fits the theme: matching tag strengths (x specificity) + similarity to an anchor."""
     theme_tags = set(theme.tags)
-    return sum(strength for tag, strength in tags if tag in theme_tags) / 100 + ANCHOR_WEIGHT * anchor_match
+    spec = specificity or {}
+    return (sum(strength * spec.get(tag, 1.0) for tag, strength in tags if tag in theme_tags) / 100
+            + ANCHOR_WEIGHT * anchor_match)
 
 
 THEME_SYSTEM = "You are a music curator planning a personal weekly playlist. Respond with JSON only."
@@ -102,7 +129,8 @@ using tags from this vocabulary (exact spelling): {', '.join(vocabulary)}""")
         rule = "a coherent lane from their listening above, weighted toward what they play most lately"
     parts.append(f"""Propose 3 different themes for this week's playlist, best first. Each theme is {rule}: one
 style a whole playlist can stay in, made of 2-6 closely related tags (exact spelling from the tags above), plus 2-5
-of the listener's artists that best represent it.
+of the listener's artists that best represent it. Prefer specific styles ("deep house", "trip-hop", "neo-soul",
+"jazz rap") over broad umbrella tags ("electronic", "indie", "rock", "pop", "dance"), which say little on their own.
 
 Return JSON: {{"themes": [{{"name": "short evocative name", "description": "one sentence on the sound",
 "tags": ["tag", "..."], "anchors": ["artist", "..."]}}]}}""")
@@ -110,7 +138,8 @@ Return JSON: {{"themes": [{{"name": "short evocative name", "description": "one 
 
 
 def choose_themes(llm: Any, lanes: list[dict[str, Any]], recent: list[str], requested: str | None,
-                  vocabulary: set[str], known_artists: dict[str, str]) -> tuple[list[Theme], Any]:
+                  vocabulary: set[str], known_artists: dict[str, str],
+                  shares: dict[str, float] | None = None) -> tuple[list[Theme], Any]:
     """Ranked themes from the AI (validated against the tag vocabulary), with a deterministic fallback.
 
     known_artists maps a lowercased artist name to its display name (anchors must be artists the listener plays).
@@ -126,6 +155,8 @@ def choose_themes(llm: Any, lanes: list[dict[str, Any]], recent: list[str], requ
             if not isinstance(item, dict):
                 continue
             tags = [t for t in (str(x).strip().lower() for x in item.get("tags") or []) if t in vocabulary]
+            specific = [t for t in tags if (shares or {}).get(t, 0) <= BROAD_TAG_SHARE]
+            tags = specific or tags     # broad umbrella tags only count when nothing more specific was given
             if not tags:
                 continue
             anchors = [known_artists[a.lower()] for a in (str(x).strip() for x in item.get("anchors") or [])
