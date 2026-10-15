@@ -192,6 +192,24 @@ def _tracks(spec):
 
 
 class TestSelection:
+    def test_one_per_artist_by_default(self):
+        tracks = _tracks([("A1", "x", "new", 3), ("A2", "y", "new", 3), ("A3", "x", "deep", 3), ("A4", "z", "deep", 3)])
+        picked = [{"id": t["id"]} for t in tracks]
+        out = dw.select_tracks(picked, tracks, {"new": 3, "deep": 2}, ["A1", "A2", "A3", "A4"])
+        keys = [t["artist_key"] for t, _ in out]
+        assert len(keys) == len(set(keys)) == 3                    # x, y, z once each; no fourth artist exists
+
+    def test_featured_credit_counts_as_main_artist(self, db):
+        cand = dw.ArtistCandidate("A1", "sampha", "Sampha", "new", None, [], "2010s", [
+            {"rating_key": "1", "title": "One", "artist": "Sampha", "album": "P", "year": 2017, "genres": []},
+            {"rating_key": "2", "title": "Two", "artist": "Sampha;Little Simz", "album": "P", "year": 2017,
+             "genres": []},
+        ])
+        tracks = dw.track_candidates([cand], None, random.Random(0))
+        assert {t["artist_key"] for t in tracks} == {"sampha"}
+        out = dw.select_tracks([{"id": t["id"]} for t in tracks], tracks, {"new": 2, "deep": 0}, ["A1"])
+        assert len(out) == 1
+
     def test_quotas_split(self):
         assert dw.split_quotas(30, 0.7, {"new": 100, "deep": 100}) == {"new": 21, "deep": 9}
         assert dw.split_quotas(30, 0.7, {"new": 100, "deep": 3}) == {"new": 27, "deep": 3}
@@ -201,16 +219,17 @@ class TestSelection:
         tracks = _tracks([("A1", "x", "new", 4), ("A2", "y", "new", 4), ("A3", "x", "deep", 4)])
         picked = [{"id": "T1"}, {"id": "T2"}, {"id": "T3"}, {"id": "T99"}, "junk", {"id": "T1"},
                   {"id": "T9", "reason": "deep"}, {"id": "T5", "reason": "y"}]
-        out = dw.select_tracks(picked, tracks, {"new": 3, "deep": 1}, ["A1", "A2", "A3"])
+        out = dw.select_tracks(picked, tracks, {"new": 3, "deep": 1}, ["A1", "A2", "A3"], max_per_artist=2)
         ids = [t["id"] for t, _ in out]
         assert ids[:2] == ["T1", "T2"]                             # third A1 track exceeds the artist cap
         assert "T9" not in ids                                     # artist x (via A1) is already at its cap
         assert len(out) == 3 or all(t["artist_key"] != "x" for t, _ in out[2:])
-        assert sum(1 for t, _ in out if t["artist_key"] == "x") <= dw.MAX_PER_ARTIST
+        assert sum(1 for t, _ in out if t["artist_key"] == "x") <= 2
 
     def test_top_up_when_ai_returns_too_few(self):
         tracks = _tracks([("A1", "a", "new", 3), ("A2", "b", "new", 3), ("A3", "c", "deep", 3)])
-        out = dw.select_tracks([{"id": "T1", "reason": "r"}], tracks, {"new": 4, "deep": 1}, ["A1", "A2", "A3"])
+        out = dw.select_tracks([{"id": "T1", "reason": "r"}], tracks, {"new": 4, "deep": 1}, ["A1", "A2", "A3"],
+                               max_per_artist=2)
         assert len(out) == 5
         assert out[0] == (tracks[0], "r")
         assert sum(1 for t, _ in out if t["kind"] == "deep") == 1
@@ -272,7 +291,7 @@ def fake_llm(monkeypatch):
 class TestRun:
     def test_first_run_creates_then_replaces(self, db, user_yaml, fake_llm):
         add_tracks(sample_library())
-        dw.save_settings({"enabled": True, "track_count": 8})
+        dw.save_settings({"enabled": True, "track_count": 8, "max_per_artist": 2})
         media = FakeMedia()
 
         first = dw.run(media, "manual")
@@ -307,8 +326,26 @@ class TestRun:
         assert dw.list_runs(1)[0]["status"] == "error"
         assert dw._last_attempt["error"]
 
+    def test_one_per_artist_run(self, db, user_yaml, fake_llm):
+        add_tracks(sample_library())
+        dw.save_settings({"enabled": True, "track_count": 7})
+        out = dw.run(FakeMedia(), "manual")
+        assert out["success"], out
+        artists = [p["artist"] for p in out["picks"]]
+        assert len(artists) == len(set(artists)) == 7               # 6 new artists + Radiohead's deep cut
+
     def test_disconnected_media_server(self, db, user_yaml, fake_llm):
         class Down(FakeMedia):
             def is_connected(self):
                 return False
         assert dw.run(Down(), "manual")["success"] is False
+
+
+class TestTopUp:
+    def test_fills_each_kind_with_best_ranked_unpicked(self):
+        def c(i, key, kind):
+            return dw.ArtistCandidate(f"A{i}", key, key, kind, None, [], "", [])
+        cands = [c(1, "a", "new"), c(2, "b", "new"), c(3, "c", "new"), c(4, "d", "deep"), c(5, "a", "deep"),
+                 c(6, "e", "deep")]
+        out = dw.top_up_artists([cands[1]], cands, {"new": 2, "deep": 2})
+        assert [x.id for x in out] == ["A2", "A1", "A4", "A6"]      # A5 skipped: artist a already in

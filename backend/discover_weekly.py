@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import random
 import threading
@@ -35,9 +36,8 @@ logger = logging.getLogger(__name__)
 RESULT_TYPE = "discover_weekly"
 DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 RETRY_MINUTES = 60
-STAGE_A_ARTISTS = 40          # artists the LLM picks in stage A
+STAGE_A_ARTISTS = 40          # artists the LLM picks in stage A (at least; scales with the playlist size)
 TRACKS_PER_ARTIST = 12        # candidate tracks per chosen artist for stage B
-MAX_PER_ARTIST = 2            # tracks per artist in the playlist
 RECENT_DAYS = 90
 TOKENS_PER_LINE = 22          # rough size of one candidate line in the prompt
 SKIP_ARTISTS = {"various artists", "various", "unknown artist", "soundtrack", "original soundtrack"}
@@ -59,6 +59,7 @@ ENV = {
     "track_count": "DISCOVER_WEEKLY_TRACKS",
     "playlist_title": "DISCOVER_WEEKLY_TITLE",
     "new_artist_share": "DISCOVER_WEEKLY_NEW_ARTIST_SHARE",
+    "max_per_artist": "DISCOVER_WEEKLY_MAX_PER_ARTIST",
     "lastfm_user": "LASTFM_USER",
     "lastfm_api_key": "LASTFM_API_KEY",
 }
@@ -72,6 +73,7 @@ class Settings:
     track_count: int = 30
     playlist_title: str = "Discover Weekly"
     new_artist_share: float = 0.7
+    max_per_artist: int = 1         # tracks by the same (main) artist in one week
     lastfm_user: str = ""
     lastfm_api_key: str = ""
     env_locked: list[str] = field(default_factory=list)
@@ -85,6 +87,7 @@ class Settings:
         return {
             "enabled": self.enabled, "day": self.day, "time": self.time, "track_count": self.track_count,
             "playlist_title": self.playlist_title, "new_artist_share": self.new_artist_share,
+            "max_per_artist": self.max_per_artist,
             "lastfm_user": self.lastfm_user, "has_lastfm_api_key": bool(self.lastfm_api_key),
             "env_locked": self.env_locked,
         }
@@ -95,6 +98,8 @@ def _coerce(name: str, value: Any) -> Any:
         return value if isinstance(value, bool) else str(value).strip().lower() in ("1", "true", "yes", "on")
     if name == "track_count":
         return max(5, min(100, int(value)))
+    if name == "max_per_artist":
+        return max(1, min(5, int(value)))
     if name == "new_artist_share":
         return max(0.0, min(1.0, float(value)))
     if name == "day":
@@ -536,6 +541,26 @@ def artist_candidates(view: LibraryView, profile: Profile, budget_lines: int, ne
     return chosen
 
 
+def top_up_artists(chosen: list[ArtistCandidate], candidates: list[ArtistCandidate],
+                   targets: dict[str, int]) -> list[ArtistCandidate]:
+    """Fill each kind up to its target with the best-ranked candidates the AI didn't pick (local models often return
+    fewer ids than asked). Candidates are already ranked by Last.fm similarity, genre fit and play history."""
+    out = list(chosen)
+    used_ids = {c.id for c in out}
+    used_artists = {c.key for c in out}
+    for kind, target in targets.items():
+        have = sum(1 for c in out if c.kind == kind)
+        for cand in candidates:
+            if have >= target:
+                break
+            if cand.kind == kind and cand.id not in used_ids and cand.key not in used_artists:
+                out.append(cand)
+                used_ids.add(cand.id)
+                used_artists.add(cand.key)
+                have += 1
+    return out
+
+
 def track_candidates(chosen: list[ArtistCandidate], lastfm: LastFmClient | None,
                      rng: random.Random) -> list[dict[str, Any]]:
     """Per chosen artist/album, up to TRACKS_PER_ARTIST unplayed tracks, best-known first when Last.fm says so."""
@@ -559,7 +584,9 @@ def track_candidates(chosen: list[ArtistCandidate], lastfm: LastFmClient | None,
         rng.shuffle(tracks)
         tracks.sort(key=lambda t: rank.get(simplify_string(t["title"]), 999))
         for t in tracks[:TRACKS_PER_ARTIST]:
-            out.append({**t, "artist_id": cand.id, "artist_key": cand.key, "kind": cand.kind})
+            # the cap counts the main artist: "Sampha" and "Sampha;Little Simz" are the same artist
+            out.append({**t, "artist_id": cand.id, "artist_key": _artist_key(_primary_artist(t["artist"])),
+                        "kind": cand.kind})
     for i, t in enumerate(out, 1):
         t["id"] = f"T{i}"
     return out
@@ -588,9 +615,9 @@ NEW ARTISTS - in their library, never played (id | artist | genres | era | track
 DEEP CUTS - albums they have never played by artists they already know:
 {deep_lines}
 
-Pick exactly {n_new} ids from NEW ARTISTS and {n_deep} ids from DEEP CUTS that this listener is most likely to
-love - close to their taste, with a few adventurous picks that still fit. Prefer variety across genres and eras
-within their taste. Base each reason on the genres shown and what you know of the artist; if you don't know an
+Pick exactly {n_new} ids from NEW ARTISTS and {n_deep} ids from DEEP CUTS, all by different artists, that this
+listener is most likely to love - close to their taste, with a few adventurous picks that still fit. Prefer variety
+across genres and eras within their taste. Base each reason on the genres shown and what you know of the artist; if you don't know an
 artist, rely on its genres and similarity instead of guessing.
 Avoid comedy, spoken word, children's music, karaoke/tribute/cover compilations, sound effects and ambient filler.
 
@@ -598,7 +625,7 @@ Return JSON: {{"artists": [{{"id": "A12", "reason": "one short sentence on why i
 
 
 def _stage_b_prompt(profile: Profile, chosen: list[ArtistCandidate], reasons: dict[str, str],
-                    tracks: list[dict[str, Any]], quotas: dict[str, int]) -> str:
+                    tracks: list[dict[str, Any]], quotas: dict[str, int], max_per_artist: int = 1) -> str:
     by_id = {c.id: c for c in chosen}
     lines = []
     for t in tracks:
@@ -612,6 +639,8 @@ def _stage_b_prompt(profile: Profile, chosen: list[ArtistCandidate], reasons: di
     artist_reasons = "\n".join(f"- {c.name}{' (' + c.album + ')' if c.album else ''}: {reasons[c.id]}"
                                for c in chosen if reasons.get(c.id)) or "(none)"
     count = sum(quotas.values())
+    per_artist_rule = ("exactly one track per artist - never two songs by the same artist (featured credits count "
+                       "as that artist)" if max_per_artist == 1 else f"at most {max_per_artist} per artist")
     return f"""The listener's taste:
 {profile.describe()}
 
@@ -623,7 +652,7 @@ Never-played tracks from their library (id | kind | artist - title (album, year)
 
 Build this week's playlist of exactly {count} tracks - {quotas.get("new", 0)} by new artists and
 {quotas.get("deep", 0)} deep cuts:
-- the strongest, most characteristic songs for this listener; at most {MAX_PER_ARTIST} per artist;
+- the strongest, most characteristic songs for this listener; {per_artist_rule};
 - ordered as a satisfying listen (an opening that draws them in, a varied middle, a strong close);
 - one short, specific reason per track (sound, mood, or link to an artist they love), consistent with the genres
   shown - do not invent a sound the genres contradict.
@@ -648,7 +677,7 @@ def split_quotas(count: int, new_share: float, available: dict[str, int]) -> dic
 
 
 def select_tracks(picked: list[dict[str, Any]], tracks: list[dict[str, Any]], quotas: dict[str, int],
-                  fallback_order: list[str]) -> list[tuple[dict[str, Any], str]]:
+                  fallback_order: list[str], max_per_artist: int = 1) -> list[tuple[dict[str, Any], str]]:
     """Map the AI's picks to tracks (ids only, max per artist, per-kind quotas, no repeats), then top up.
 
     The playlist keeps the AI's order; top-up tracks go at the end.
@@ -667,7 +696,7 @@ def select_tracks(picked: list[dict[str, Any]], tracks: list[dict[str, Any]], qu
         result.append((t, reason))
 
     def fits(t: dict[str, Any]) -> bool:
-        return (t["id"] not in used and per_artist[t["artist_key"]] < MAX_PER_ARTIST
+        return (t["id"] not in used and per_artist[t["artist_key"]] < max_per_artist
                 and per_kind[t["kind"]] < quotas.get(t["kind"], 0))
 
     for item in picked:
@@ -677,7 +706,7 @@ def select_tracks(picked: list[dict[str, Any]], tracks: list[dict[str, Any]], qu
         if t and fits(t):
             take(t, str(item.get("reason") or "").strip())
     # Top up: one track per artist in the order the AI ranked the artists, then a second round
-    for _ in range(MAX_PER_ARTIST):
+    for _ in range(max_per_artist):
         for artist_id in fallback_order:
             if len(result) >= count:
                 return result
@@ -720,9 +749,11 @@ def generate(settings: Settings, media_client: Any, now: datetime | None = None,
         candidates = artist_candidates(view, profile, budget, settings.new_artist_share, rng, exclude_recent=False)
     if not candidates:
         raise RuntimeError("no unplayed artists left to choose from")
-    n_new = round(STAGE_A_ARTISTS * settings.new_artist_share)
-    say(f"stage A: {len(candidates)} candidate artists/albums")
-    resp_a = llm.analyze(_stage_a_prompt(profile, candidates, n_new, STAGE_A_ARTISTS - n_new), SYSTEM)
+    # enough artists that the playlist fills up with max_per_artist tracks each, plus spares
+    stage_a = max(STAGE_A_ARTISTS, math.ceil(settings.track_count / settings.max_per_artist * 1.4))
+    n_new = round(stage_a * settings.new_artist_share)
+    say(f"stage A: {len(candidates)} candidate artists/albums, picking {stage_a}")
+    resp_a = llm.analyze(_stage_a_prompt(profile, candidates, n_new, stage_a - n_new), SYSTEM)
     data_a = _parse(llm, resp_a)
     by_id = {c.id: c for c in candidates}
     reasons: dict[str, str] = {}
@@ -734,20 +765,29 @@ def generate(settings: Settings, media_client: Any, now: datetime | None = None,
             reasons[cid] = str(item.get("reason") or "").strip()
     if len(chosen) < min(5, len(candidates)):
         raise RuntimeError(f"the AI picked only {len(chosen)} usable artists")
+    chosen = top_up_artists(chosen, candidates, {"new": n_new, "deep": stage_a - n_new})
 
     tracks = track_candidates(chosen, lastfm, rng)
     say(f"stage B: {len(tracks)} candidate tracks from {len(chosen)} artists/albums")
-    quotas = split_quotas(settings.track_count, settings.new_artist_share, Counter(t["kind"] for t in tracks))
-    resp_b = llm.generate(_stage_b_prompt(profile, chosen, reasons, tracks, quotas), SYSTEM)
+    # what each kind can supply under the per-artist cap (distinct main artists x cap, at most its tracks)
+    artists_by_kind: dict[str, set[str]] = defaultdict(set)
+    for t in tracks:
+        artists_by_kind[t["kind"]].add(t["artist_key"])
+    available = {kind: min(n, len(artists_by_kind[kind]) * settings.max_per_artist)
+                 for kind, n in Counter(t["kind"] for t in tracks).items()}
+    quotas = split_quotas(settings.track_count, settings.new_artist_share, available)
+    resp_b = llm.generate(_stage_b_prompt(profile, chosen, reasons, tracks, quotas, settings.max_per_artist), SYSTEM)
     data_b = _parse(llm, resp_b)
-    selected = select_tracks(data_b.get("tracks") or [], tracks, quotas, [c.id for c in chosen])
+    selected = select_tracks(data_b.get("tracks") or [], tracks, quotas, [c.id for c in chosen],
+                             settings.max_per_artist)
     if not selected:
         raise RuntimeError("the AI returned no usable tracks")
 
     local = (now or _now()).astimezone()
     week = f"{local.day} {local:%b %Y}"
-    title = str(data_b.get("title") or "").strip() or "This week"
-    intro = str(data_b.get("intro") or "").strip()
+    title = str(data_b.get("title") or data_b.get("playlist_title") or data_b.get("name") or "").strip()
+    title = title or f"Week of {week}"
+    intro = str(data_b.get("intro") or data_b.get("description") or data_b.get("narrative") or "").strip()
     picks = []
     for t, reason in selected:
         artist_reason = reasons.get(t["artist_id"], "")

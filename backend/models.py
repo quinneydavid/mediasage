@@ -987,6 +987,7 @@ class DiscoverWeeklySettingsRequest(BaseModel):
     track_count: int | None = Field(None, ge=5, le=100)
     playlist_title: str | None = None
     new_artist_share: float | None = Field(None, ge=0, le=1)
+    max_per_artist: int | None = Field(None, ge=1, le=5)
     lastfm_user: str | None = None
     lastfm_api_key: str | None = None
 
