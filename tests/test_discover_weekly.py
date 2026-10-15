@@ -349,3 +349,26 @@ class TestTopUp:
                  c(6, "e", "deep")]
         out = dw.top_up_artists([cands[1]], cands, {"new": 2, "deep": 2})
         assert [x.id for x in out] == ["A2", "A1", "A4", "A6"]      # A5 skipped: artist a already in
+
+
+class TestRegeneration:
+    def test_same_week_picks_are_not_rested(self, db):
+        slot = dw.last_scheduled_at(dw.Settings())
+        old = dw._record_start("schedule")
+        dw._record_end(old, status="success", picks=[{"artist": "Old", "rating_key": "1"}])
+        conn = library_cache.get_db_connection()
+        conn.execute("UPDATE discover_weekly_runs SET started_at = ? WHERE id = ?",
+                     ((slot - timedelta(days=7)).isoformat(), old))
+        conn.commit()
+        conn.close()
+        this_week = dw._record_start("manual")
+        dw._record_end(this_week, status="success", picks=[{"artist": "New", "rating_key": "2"}])
+        artists = {p["artist"] for p in dw._previous_picks(before=slot)}
+        assert artists == {"Old"}
+
+    def test_top_up_prefers_lastfm_similarity(self):
+        def c(i, key, match, score):
+            return dw.ArtistCandidate(f"A{i}", key, key, "new", None, [], "", [], score, "", match)
+        cands = [c(1, "genre-only", 0.0, 9.0), c(2, "similar", 0.8, 1.0), c(3, "less-similar", 0.3, 5.0)]
+        out = dw.top_up_artists([], cands, {"new": 2})
+        assert [x.key for x in out] == ["similar", "less-similar"]
