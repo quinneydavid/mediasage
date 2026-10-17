@@ -933,6 +933,16 @@ class PlexClient(BaseMediaClient):
             logger.exception("Failed to get playlists: %s", e)
             return []
 
+    def get_playlist_track_keys(self, playlist_id: str) -> list[str] | None:
+        """Rating keys of a playlist's tracks in order, or None when it can't be read."""
+        if not self._server:
+            return None
+        try:
+            return [str(item.ratingKey) for item in self._server.fetchItem(int(playlist_id)).items()]
+        except Exception as e:
+            logger.warning("Failed to read playlist %s: %s", playlist_id, e)
+            return None
+
     def update_playlist(
         self,
         playlist_id: str,

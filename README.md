@@ -370,6 +370,7 @@ Environment variables are optional, for scripted or automated installs. A variab
 | `DISCOVER_WEEKLY_DAY` / `DISCOVER_WEEKLY_TIME` | When it runs (default: `monday` / `06:00`, container time zone - set `TZ`) |
 | `DISCOVER_WEEKLY_TRACKS` | Tracks per week (default: 30) |
 | `DISCOVER_WEEKLY_TITLE` | Playlist name (default: Discover Weekly) |
+| `DISCOVER_WEEKLY_ARCHIVE` | Name of an archive playlist: before a new week replaces the playlist, last week's tracks are appended to it (tracks removed during the week stay out, no duplicates). Empty (default) = off. Also in Settings |
 | `DISCOVER_WEEKLY_MAX_PER_ARTIST` | Tracks by the same artist per week (default: 1 = no repeated artists; featured credits count as the main artist) |
 | `DISCOVER_WEEKLY_THEMES` | `auto` (default): one style theme per week from your listening (needs Last.fm); `off`: a mix of everything |
 | `DISCOVER_WEEKLY_ORDER_BY_SOUND` | `false` keeps the AI's track order; by default (Plex) tracks are arranged so each flows into the next by sonic similarity and loudness |

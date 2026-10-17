@@ -3474,7 +3474,7 @@ let _dwPollTimer = null;
 const DW_FIELDS = {
     enabled: 'dw-enabled', day: 'dw-day', time: 'dw-time', track_count: 'dw-track-count',
     new_artist_share: 'dw-new-share', max_per_artist: 'dw-max-per-artist', order_by_sound: 'dw-order-by-sound', theme_mode: 'dw-theme-mode', next_theme: 'dw-next-theme',
-    playlist_title: 'dw-title', lastfm_user: 'dw-lastfm-user',
+    playlist_title: 'dw-title', archive_title: 'dw-archive', lastfm_user: 'dw-lastfm-user',
     lastfm_api_key: 'dw-lastfm-key',
 };
 
@@ -3490,6 +3490,7 @@ function renderDiscoverWeekly(data) {
     document.getElementById('dw-theme-mode').value = s.theme_mode;
     document.getElementById('dw-next-theme').value = s.next_theme || '';
     document.getElementById('dw-title').value = s.playlist_title;
+    document.getElementById('dw-archive').value = s.archive_title || '';
     document.getElementById('dw-lastfm-user').value = s.lastfm_user || '';
     const key = document.getElementById('dw-lastfm-key');
     key.value = '';
@@ -3545,6 +3546,7 @@ async function saveDiscoverWeekly() {
         theme_mode: document.getElementById('dw-theme-mode').value,
         next_theme: document.getElementById('dw-next-theme').value.trim(),
         playlist_title: document.getElementById('dw-title').value.trim(),
+        archive_title: document.getElementById('dw-archive').value.trim(),
         lastfm_user: document.getElementById('dw-lastfm-user').value.trim(),
     };
     const key = document.getElementById('dw-lastfm-key').value.trim();

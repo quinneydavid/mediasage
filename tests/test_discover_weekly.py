@@ -445,3 +445,89 @@ class TestThemes:
         assert dw.run(FakeMedia(), "manual")["success"]
         assert "beats please" in fake_llm.prompts[0]
         assert dw.load_settings().next_theme == ""
+
+
+class ArchiveMedia(FakeMedia):
+    """FakeMedia that remembers playlist contents (for the archive)."""
+    def __init__(self, update_ok=True, archive_ok=True):
+        super().__init__(update_ok)
+        self.archive_ok = archive_ok
+        self.playlists = {}
+
+    def create_playlist(self, name, keys, description=""):
+        if not self.archive_ok and "Archive" in name:
+            return {"success": False, "error": "server says no"}
+        out = super().create_playlist(name, keys, description)
+        self.playlists[out["playlist_id"]] = list(keys)
+        return out
+
+    def update_playlist(self, playlist_id, keys, mode="replace", description=""):
+        out = super().update_playlist(playlist_id, keys, mode, description)
+        if out["success"]:
+            have = self.playlists.setdefault(playlist_id, [])
+            self.playlists[playlist_id] = list(keys) if mode == "replace" else have + [k for k in keys if k not in have]
+        return out
+
+    def get_playlist_track_keys(self, playlist_id):
+        return self.playlists.get(playlist_id)
+
+
+def _age_last_run(days=8):
+    """Pretend the latest run happened `days` ago (an earlier week)."""
+    conn = library_cache.ensure_db_initialized()
+    try:
+        conn.execute("UPDATE discover_weekly_runs SET started_at = ? WHERE id = (SELECT MAX(id) FROM discover_weekly_runs)",
+                     ((dw._now() - timedelta(days=days)).isoformat(),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestArchive:
+    def test_off_by_default(self, db, user_yaml, fake_llm):
+        add_tracks(sample_library())
+        dw.save_settings({"enabled": True, "track_count": 5})
+        media = ArchiveMedia()
+        assert dw.run(media, "manual")["success"]
+        _age_last_run()
+        assert dw.run(media, "manual")["success"]
+        assert [c[0] for c in media.created] == ["Discover Weekly"]
+
+    def test_earlier_weeks_are_appended_without_duplicates(self, db, user_yaml, fake_llm):
+        add_tracks(sample_library())
+        dw.save_settings({"enabled": True, "track_count": 5, "archive_title": "Discover Weekly Archive"})
+        media = ArchiveMedia()
+        week1 = dw.run(media, "manual")
+        assert week1["success"]
+        media.playlists["pl1"] = media.playlists["pl1"][1:]        # the listener removed a track during the week
+        kept = list(media.playlists["pl1"])
+        _age_last_run()
+        week2 = dw.run(media, "manual")
+        assert week2["success"], week2
+        assert media.created[-1][0] == "Discover Weekly Archive"
+        assert media.playlists["pl2"] == kept
+        assert media.playlists["pl1"] == [p["rating_key"] for p in week2["picks"]]
+        _age_last_run()
+        assert dw.run(media, "manual")["success"]
+        assert len(media.created) == 2                              # the same archive playlist, appended to
+        assert media.updated[-2][0] == "pl2" and media.updated[-2][2] == "append"
+        assert len(media.playlists["pl2"]) == len(set(media.playlists["pl2"]))
+
+    def test_regeneration_in_the_same_week_archives_nothing(self, db, user_yaml, fake_llm):
+        add_tracks(sample_library())
+        dw.save_settings({"enabled": True, "track_count": 5, "archive_title": "Discover Weekly Archive"})
+        media = ArchiveMedia()
+        assert dw.run(media, "manual")["success"]
+        assert dw.run(media, "manual")["success"]
+        assert [c[0] for c in media.created] == ["Discover Weekly"]
+
+    def test_archive_failure_keeps_last_week(self, db, user_yaml, fake_llm):
+        add_tracks(sample_library())
+        dw.save_settings({"enabled": True, "track_count": 5, "archive_title": "Discover Weekly Archive"})
+        media = ArchiveMedia(archive_ok=False)
+        assert dw.run(media, "manual")["success"]
+        before = list(media.playlists["pl1"])
+        _age_last_run()
+        out = dw.run(media, "manual")
+        assert out["success"] is False and "archive" in out["error"]
+        assert media.playlists["pl1"] == before                     # not replaced: nothing lost

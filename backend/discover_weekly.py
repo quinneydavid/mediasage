@@ -61,6 +61,7 @@ ENV = {
     "time": "DISCOVER_WEEKLY_TIME",
     "track_count": "DISCOVER_WEEKLY_TRACKS",
     "playlist_title": "DISCOVER_WEEKLY_TITLE",
+    "archive_title": "DISCOVER_WEEKLY_ARCHIVE",
     "new_artist_share": "DISCOVER_WEEKLY_NEW_ARTIST_SHARE",
     "max_per_artist": "DISCOVER_WEEKLY_MAX_PER_ARTIST",
     "order_by_sound": "DISCOVER_WEEKLY_ORDER_BY_SOUND",
@@ -78,6 +79,7 @@ class Settings:
     time: str = "06:00"
     track_count: int = 30
     playlist_title: str = "Discover Weekly"
+    archive_title: str = ""         # a playlist that keeps every past week's tracks (empty = off)
     new_artist_share: float = 0.7
     max_per_artist: int = 1         # tracks by the same (main) artist in one week
     order_by_sound: bool = True     # reorder by the media server's sonic analysis so tracks blend (Plex)
@@ -95,7 +97,8 @@ class Settings:
         """Settings for the API: the Last.fm key is never sent back, only whether one is set."""
         return {
             "enabled": self.enabled, "day": self.day, "time": self.time, "track_count": self.track_count,
-            "playlist_title": self.playlist_title, "new_artist_share": self.new_artist_share,
+            "playlist_title": self.playlist_title, "archive_title": self.archive_title,
+            "new_artist_share": self.new_artist_share,
             "max_per_artist": self.max_per_artist, "order_by_sound": self.order_by_sound,
             "theme_mode": self.theme_mode, "next_theme": self.next_theme,
             "lastfm_user": self.lastfm_user, "has_lastfm_api_key": bool(self.lastfm_api_key),
@@ -199,6 +202,11 @@ def _ensure_tables(conn) -> None:
         conn.execute("ALTER TABLE discover_weekly_runs ADD COLUMN theme TEXT")
     except Exception:
         pass    # column exists
+    for col in ("archived_at", "archive_playlist_id"):
+        try:
+            conn.execute(f"ALTER TABLE discover_weekly_runs ADD COLUMN {col} TEXT")
+        except Exception:
+            pass    # column exists
 
 
 def _record_start(trigger: str) -> int:
@@ -965,6 +973,9 @@ def generate(settings: Settings, media_client: Any, now: datetime | None = None,
         })
     theme_part = f" - this week: {theme.name}" if theme else ""
     description = f"{title}{theme_part} - week of {week}. {intro}".strip()
+    if settings.archive_title:
+        say("archiving last week's playlist")
+        archive_previous(media_client, settings, now)
     say(f"publishing {len(picks)} tracks")
     playlist_id = publish(media_client, settings.playlist_title, [p["rating_key"] for p in picks], description)
 
@@ -990,6 +1001,57 @@ def generate(settings: Settings, media_client: Any, now: datetime | None = None,
         logger.warning("Discover Weekly: could not save to history: %s", e)
     return {"playlist_id": playlist_id, "title": title, "intro": intro, "picks": picks, "result_id": result_id,
             "tokens": tokens, "theme": theme.to_dict() if theme else None}
+
+
+def _archive_playlist_id() -> str | None:
+    conn = library_cache.ensure_db_initialized()
+    try:
+        _ensure_tables(conn)
+        row = conn.execute("SELECT archive_playlist_id FROM discover_weekly_runs WHERE archive_playlist_id IS NOT NULL "
+                           "ORDER BY id DESC LIMIT 1").fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def archive_previous(media_client: Any, settings: Settings, now: datetime | None = None) -> int:
+    """Before an earlier week's playlist is replaced, append its tracks to the archive playlist (created when missing).
+
+    The tracks come from the media server's playlist as it is now, so tracks the listener removed during the week
+    stay out; the run's saved picks are the fallback. A regeneration in the same week archives nothing. Raises when the
+    archive can't be written, so the old week is never replaced before it is kept. Returns the tracks handed over.
+    """
+    prev = next((r for r in list_runs(limit=5, status="success") if r["playlist_id"]), None)
+    if not prev or prev.get("archived_at"):
+        return 0
+    if datetime.fromisoformat(prev["started_at"]) >= last_scheduled_at(settings, now):
+        return 0        # this week's playlist (a regeneration replaces it) - not an earlier week
+    keys = None
+    getter = getattr(media_client, "get_playlist_track_keys", None)
+    if getter:
+        keys = getter(prev["playlist_id"])
+    if keys is None:
+        keys = [p["rating_key"] for p in prev["picks"]]
+    archive_id = None
+    if keys:
+        description = f"Every earlier {settings.playlist_title} playlist, oldest first."
+        archive_id = _archive_playlist_id()
+        result = (media_client.update_playlist(archive_id, keys, mode="append", description=description)
+                  if archive_id else {"success": False})
+        if not result.get("success"):
+            created = media_client.create_playlist(settings.archive_title, keys, description)
+            if not created.get("success"):
+                raise RuntimeError(f"could not write the archive playlist: {created.get('error')}")
+            archive_id = str(created.get("playlist_id"))
+    conn = library_cache.ensure_db_initialized()
+    try:
+        conn.execute("UPDATE discover_weekly_runs SET archived_at = ?, archive_playlist_id = ? WHERE id = ?",
+                     (_now().isoformat(), archive_id, prev["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info("Discover Weekly: archived %d tracks of '%s' to playlist %s", len(keys), prev.get("title"), archive_id)
+    return len(keys)
 
 
 def publish(media_client: Any, playlist_title: str, rating_keys: list[str], description: str) -> str:
