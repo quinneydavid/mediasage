@@ -3493,6 +3493,12 @@ function renderDiscoverWeekly(data) {
     document.getElementById('dw-title').value = s.playlist_title;
     document.getElementById('dw-archive').value = s.archive_title || '';
     document.getElementById('dw-lastfm-user').value = s.lastfm_user || '';
+    // Jellyfin has no sonic analysis, and its playlists are not read back for the archive
+    const isJellyfin = state.config?.media_server === 'jellyfin';
+    document.getElementById('dw-order-by-sound-group').hidden = isJellyfin;
+    document.getElementById('dw-archive-hint').textContent = isJellyfin
+        ? "Before each new week replaces the playlist, last week's tracks are added here, so nothing good is lost. On Jellyfin this is the full list as generated, including tracks you removed during the week. Empty = off."
+        : "Before each new week replaces the playlist, last week's tracks are added here, so nothing good is lost. Tracks you removed during the week stay out. Empty = off.";
     const key = document.getElementById('dw-lastfm-key');
     key.value = '';
     key.placeholder = s.has_lastfm_api_key ? 'Saved (leave empty to keep)' : 'From last.fm/api/account/create';

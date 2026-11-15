@@ -914,9 +914,9 @@
                         <input type="text" id="dw-next-theme" placeholder="e.g. jazz, 90s hip hop, deep house">
                         <p class="filter-hint">Used once, for the next playlist (scheduled or Generate now).</p>
                     </div>
-                    <div class="form-group">
+                    <div class="form-group" id="dw-order-by-sound-group">
                         <label class="checkbox-label"><input type="checkbox" id="dw-order-by-sound"> Order by sound</label>
-                        <p class="filter-hint">Arranges the tracks so each one flows into the next, using Plex's sonic analysis and loudness. The AI's opening and closing tracks stay put.</p>
+                        <p class="filter-hint">Arranges the tracks so each one flows into the next, using Plex's sonic analysis and loudness. The AI's opening and closing tracks stay put. Plex only.</p>
                     </div>
                     <div class="form-group">
                         <label for="dw-title">Playlist name</label>
@@ -925,7 +925,7 @@
                     <div class="form-group">
                         <label for="dw-archive">Archive playlist (optional)</label>
                         <input type="text" id="dw-archive" placeholder="e.g. Discover Weekly Archive">
-                        <p class="filter-hint">Before each new week replaces the playlist, last week's tracks are added here, so nothing good is lost. Tracks you removed during the week stay out. Empty = off.</p>
+                        <p class="filter-hint" id="dw-archive-hint">Before each new week replaces the playlist, last week's tracks are added here, so nothing good is lost. Tracks you removed during the week stay out. Empty = off.</p>
                     </div>
                     <div class="form-group">
                         <label for="dw-lastfm-user">Last.fm user (optional)</label>
